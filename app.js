@@ -69,12 +69,12 @@ function deltaText(cur, prev) {
 // ---------- хранилище (IndexedDB) ----------
 // Версию базы можно только повышать. При обновлении приложения существующие записи не трогаются:
 // onupgradeneeded лишь добавляет недостающие хранилища.
-const STORES = ['analyses', 'studies', 'conclusions', 'meds', 'files', 'inbox', 'backups'];
-const RECORDS = ['analyses', 'studies', 'conclusions', 'meds'];
+const STORES = ['analyses', 'studies', 'conclusions', 'meds', 'cycles', 'files', 'inbox', 'backups'];
+const RECORDS = ['analyses', 'studies', 'conclusions', 'meds', 'cycles'];
 const DB = (() => {
   let db;
   const open = () => new Promise((res, rej) => {
-    const r = indexedDB.open('med-tracker', 4);
+    const r = indexedDB.open('med-tracker', 5);
     r.onupgradeneeded = () => STORES.forEach(s => { if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' }); });
     r.onsuccess = () => { db = r.result; db.onversionchange = () => db.close(); res(); };
     r.onerror = () => rej(r.error);
@@ -98,16 +98,17 @@ const DB = (() => {
   };
 })();
 
-let analyses = [], studies = [], conclusions = [], meds = [], inbox = [], backups = [];
+let analyses = [], studies = [], conclusions = [], meds = [], cycles = [], inbox = [], backups = [];
 async function load() {
   analyses = (await DB.all('analyses')).sort(byDateDesc);
   studies = (await DB.all('studies')).sort(byDateDesc);
   conclusions = (await DB.all('conclusions')).sort(byDateDesc);
   meds = (await DB.all('meds')).sort(byDateDesc);
+  cycles = (await DB.all('cycles')).sort((a, b) => a.start.localeCompare(b.start));
   inbox = (await DB.all('inbox')).sort((a, b) => a.addedAt - b.addedAt);
   backups = (await DB.all('backups')).sort((a, b) => b.at - a.at);
 }
-const hasData = () => analyses.length + studies.length + conclusions.length + meds.length > 0;
+const hasData = () => analyses.length + studies.length + conclusions.length + meds.length + cycles.length > 0;
 
 // Файлы удаляем, только когда на них не ссылается ни одна запись и ни одна точка восстановления
 async function gc() {
@@ -132,10 +133,51 @@ async function migrate() {
   }
 }
 
+// ---------- цикл и нормы по фазам ----------
+const PHASES = { follicular: 'Фолликулиновая', ovulatory: 'Овуляторная', luteal: 'Лютеиновая', postmeno: 'Постменопауза' };
+const dnum = iso => Math.round(Date.parse(iso + 'T00:00:00Z') / 864e5);
+const addDays = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
+function cycleStats() {
+  const starts = cycles.map(c => c.start), lens = [];
+  for (let i = 0; i < starts.length - 1; i++) { const d = dnum(starts[i + 1]) - dnum(starts[i]); if (d >= 15 && d <= 60) lens.push(d); }
+  const recent = lens.slice(-6);
+  return { starts, lens, avg: recent.length ? Math.round(recent.reduce((a, b) => a + b, 0) / recent.length) : 28, known: recent.length > 0 };
+}
+// Фаза на дату — оценка по календарю: овуляция принимается за 14 дней до следующей менструации.
+function phaseOn(date) {
+  if (!date || !cycles.length) return null;
+  const st = cycleStats();
+  const prev = [...st.starts].reverse().find(x => x <= date);
+  if (!prev) return null;
+  const next = st.starts.find(x => x > date);
+  const len = next ? dnum(next) - dnum(prev) : st.avg, day = dnum(date) - dnum(prev) + 1;
+  if (len < 15 || len > 60 || (!next && day > len + 7)) return null;
+  const ov = len - 14;
+  return { phase: day < ov - 1 ? 'follicular' : day <= ov + 1 ? 'ovulatory' : 'luteal', day, len, exact: !!next };
+}
+function analysisPhase(a) {
+  if (a.phase === 'none') return null;
+  if (PHASES[a.phase]) return { phase: a.phase, manual: true };
+  return phaseOn(a.date);
+}
+const hasPhased = a => (a.results || []).some(r => (r.phases || []).length);
+// результаты анализа с нормой, выбранной под фазу цикла
+function resultsOf(a) {
+  if (!hasPhased(a)) return a.results || [];
+  const ph = analysisPhase(a);
+  return a.results.map(r => {
+    if (!(r.phases || []).length) return r;
+    const hit = ph && r.phases.find(x => x.id === ph.phase);
+    return hit ? { ...r, min: hit.min, max: hit.max, phaseLabel: PHASES[ph.phase] } : { ...r, min: '', max: '', needPhase: true };
+  });
+}
+const phasesToText = list => (list || []).map(x => `${PHASES[x.id].toLowerCase()} ${x.min !== '' && x.max !== '' ? x.min + '-' + x.max : x.max !== '' ? '<' + x.max : '>' + x.min}`).join('; ');
+const normText = r => (r.needPhase ? 'зависит от фазы' : rangeText(r) + (r.phaseLabel ? `, ${r.phaseLabel.toLowerCase()}` : ''));
+
 // ---------- ряды данных ----------
 function seriesMap() {
   const m = new Map();
-  [...analyses].reverse().forEach(a => (a.results || []).forEach(r => {
+  [...analyses].reverse().forEach(a => resultsOf(a).forEach(r => {
     if (!r.name || !r.name.trim()) return;
     const k = key(r.name);
     if (!m.has(k)) m.set(k, { name: r.name.trim(), pts: [] });
@@ -271,21 +313,28 @@ const block = (title, text) => (text ? `<h4>${title}</h4><p class="note">${esc(t
 const recHead = (icon, tint, title, sub, btns) => `<div class="rec-head"><span class="ico ${tint}">${ic(icon)}</span><div class="rec-title"><h3>${title}</h3><div class="muted">${sub}</div></div>${btns}</div>`;
 
 function resultsTable(a) {
-  if (!(a.results || []).length) return '';
-  return `<table><thead><tr><th>Показатель</th><th>Значение</th><th>Норма</th></tr></thead><tbody>${a.results.map(r => {
+  const list = resultsOf(a);
+  if (!list.length) return '';
+  return `<table><thead><tr><th>Показатель</th><th>Значение</th><th>Норма</th></tr></thead><tbody>${list.map(r => {
     const f = flag(r);
-    return `<tr><td><a href="#/indicators/${enc(key(r.name))}">${esc(r.name)}</a></td><td class="v ${f}">${esc(r.value)} <small>${unitHtml(r.unit)}</small></td><td class="muted">${esc(rangeText(r))}</td></tr>`;
+    return `<tr><td><a href="#/indicators/${enc(key(r.name))}">${esc(r.name)}</a></td><td class="v ${f}">${esc(r.value)} <small>${unitHtml(r.unit)}</small></td><td class="muted">${esc(normText(r))}</td></tr>`;
   }).join('')}</tbody></table>`;
 }
+function phaseNote(a) {
+  if (!hasPhased(a)) return '';
+  const ph = analysisPhase(a);
+  if (!ph) return `<p class="hint">Часть норм зависит от фазы цикла. Отметьте начало цикла в <a href="#/cycle">дневнике</a> или выберите фазу в анализе.</p>`;
+  return `<p><span class="pill plain">${PHASES[ph.phase]} фаза${ph.day ? `, ${ph.day}-й день цикла` : ''}${ph.manual ? ', указана вручную' : ', оценка по дневнику'}</span></p>`;
+}
 function analysisCard(a) {
-  const bad = (a.results || []).filter(r => ['low', 'high'].includes(flag(r))).length;
+  const bad = resultsOf(a).filter(r => ['low', 'high'].includes(flag(r))).length;
   return `<article class="card">${recHead('drop', 'sky', `Анализ от ${fmtDate(a.date)}`, `${esc(a.lab || 'Лаборатория не указана')}${bad ? `, вне нормы: ${bad}` : ''} ${nextBadge(a)}`, cardBtns('analysis', a.id))}
-    ${resultsTable(a)}${a.note ? `<p class="note">${esc(a.note)}</p>` : ''}${fileLinks(a.files)}</article>`;
+    ${phaseNote(a)}${resultsTable(a)}${a.note ? `<p class="note">${esc(a.note)}</p>` : ''}${fileLinks(a.files)}</article>`;
 }
 function studyCard(s) {
   return `<article class="card">${recHead('scan', 'lilac', `<a href="#/studies/${enc(studyKey(s))}">${esc(studyTitle(s))}</a>`, `${fmtDate(s.date)}${s.clinic ? ', ' + esc(s.clinic) : ''}${s.doctor ? ', ' + esc(s.doctor) : ''} ${nextBadge(s)}`, cardBtns('study', s.id))}
     ${conclHtml(studyText(s).conclusion)}${paramsHtml(studyParams(s))}${studyText(s).recs ? `<h4>Рекомендации</h4>${listHtml(studyText(s).recs)}` : ''}${medChips(s.id)}
-    ${s.description ? `<details><summary>Полный текст протокола</summary><p class="note">${esc(s.description)}</p></details>` : ''}${fileLinks(s.files)}</article>`;
+    ${s.description ? (studyParams(s).length < 4 ? `<h4>Описание</h4>${listHtml(s.description.replace(/([.;])\s+(?=[А-ЯЁA-Z])/g, '$1\n'))}` : `<details><summary>Полный текст протокола</summary><p class="note">${esc(s.description)}</p></details>`) : ''}${fileLinks(s.files)}</article>`;
 }
 const visitType = c => `${c.kind || 'Консультация'}${c.specialty ? ', ' + c.specialty.toLowerCase() : ''}`;
 function conclusionCard(c) {
@@ -360,9 +409,10 @@ function viewMore() {
     ${item('#/indicators', 'green', 'pulse', 'Показатели', 'Графики и динамика')}
     ${item('#/conclusions', 'cream', 'doc', 'Заключения', 'Врачи и исследования')}
     ${item('#/meds', 'lilac', 'pill', 'Лекарства', meds.filter(m => m.active !== false).length ? `Назначено сейчас: ${meds.filter(m => m.active !== false).length}` : 'Назначения врачей')}
-    ${item('#/timeline', 'sky', 'clock', 'Хронология', 'Вся история по годам')}
+    ${item('#/cycle', 'sky', 'cal', 'Цикл', (() => { const n = phaseOn(today()); return n ? `${n.day}-й день, ${PHASES[n.phase].toLowerCase()} фаза` : 'Дневник и фазы'; })())}
+    ${item('#/timeline', 'cream', 'clock', 'Хронология', 'Вся история по годам')}
     ${item('#/summary', 'green', 'file', 'Сводка для врача', 'Одна страница для приёма')}
-    ${item('#/scans', 'sky', 'up', 'Сканы', inbox.length ? `Ждут проверки: ${inbox.length}` : 'Загрузка и распознавание')}
+    ${item('#/scans', 'lilac', 'up', 'Сканы', inbox.length ? `Ждут проверки: ${inbox.length}` : 'Загрузка и распознавание')}
     ${item('#/data', 'cream', 'shield', 'Копии и настройки', 'Резервные копии, тема')}</div>`;
 }
 
@@ -411,6 +461,78 @@ function viewConclusions(param) {
   listView('Заключения', all, x => x.html, `<button class="primary" data-act="add-conclusion">${ic('plus')}Заключение</button>`, x => x.text,
     'Заключений пока нет. Сюда попадают заключения врачей и выводы из УЗИ, МРТ и других исследований.',
     `<div class="chips">${chips.map(([k, t]) => `<a class="btn sm ${param === k ? 'primary' : ''}" href="#/conclusions${k ? '/' + k : ''}">${t}</a>`).join('')}</div>`);
+}
+
+// ---------- дневник цикла ----------
+function parseCycleDates(text) {
+  const days = new Set(), ranges = [];
+  const iso = (y, m, d) => { y = +y; if (y < 100) y += 2000; m = +m; d = +d; return m >= 1 && m <= 12 && d >= 1 && d <= 31 && y > 1990 ? `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}` : null; };
+  for (const line of String(text).split(/\r?\n/)) {
+    const found = [];
+    let m; const r1 = /(\d{4})-(\d{2})-(\d{2})/g, r2 = /(\d{1,2})[.\/](\d{1,2})[.\/](\d{4}|\d{2})(?!\d)/g;
+    while ((m = r1.exec(line))) found.push([m.index, iso(m[1], m[2], m[3])]);
+    while ((m = r2.exec(line))) found.push([m.index, iso(m[3], m[2], m[1])]);
+    const ds = found.filter(x => x[1] && x[1] <= today()).sort((a, b) => a[0] - b[0]).map(x => x[1]);
+    if (ds.length >= 2 && ds[1] >= ds[0] && dnum(ds[1]) - dnum(ds[0]) <= 14) ranges.push([ds[0], ds[1]]);
+    else ds.forEach(d => days.add(d));
+  }
+  // подряд идущие дни (выгрузки «по дням») склеиваем в одну менструацию
+  const sorted = [...days].sort();
+  let cur = null;
+  for (const d of sorted) {
+    if (cur && dnum(d) - dnum(cur[1]) <= 2) cur[1] = d; else { if (cur) ranges.push(cur); cur = [d, d]; }
+  }
+  if (cur) ranges.push(cur);
+  return ranges.sort((a, b) => a[0].localeCompare(b[0])).map(([start, end]) => ({ start, end: end !== start ? end : '' }));
+}
+async function saveCycles(list) {
+  const have = new Set(cycles.map(c => c.start));
+  let n = 0;
+  for (const c of list) {
+    if (have.has(c.start) || [...have].some(x => Math.abs(dnum(x) - dnum(c.start)) < 10)) continue;
+    await DB.put('cycles', { id: uid(), start: c.start, end: c.end || '', note: '' }); have.add(c.start); n++;
+  }
+  return n;
+}
+function viewCycle() {
+  const st = cycleStats(), now = phaseOn(today()), last = st.starts[st.starts.length - 1];
+  const next = last ? addDays(last, st.avg) : '';
+  const bar = now ? (() => {
+    const ov = now.len - 14, pct = x => (x / now.len * 100).toFixed(1);
+    const per = cycles[cycles.length - 1].end ? dnum(cycles[cycles.length - 1].end) - dnum(last) + 1 : 5;
+    return `<div class="cbar"><i class="men" style="width:${pct(per)}%"></i><i class="fol" style="width:${pct(Math.max(0, ov - 2 - per))}%"></i><i class="ovu" style="width:${pct(3)}%"></i><i class="lut" style="width:${pct(now.len - ov - 1)}%"></i><b style="left:${pct(Math.min(now.day, now.len) - .5)}%"></b></div>
+      <div class="clegend"><span><i class="men"></i>Менструация</span><span><i class="fol"></i>Фолликулиновая</span><span><i class="ovu"></i>Овуляторная</span><span><i class="lut"></i>Лютеиновая</span></div>`;
+  })() : '';
+  const rows = [...cycles].reverse().map((c, i, arr) => {
+    const newer = arr[i - 1];
+    return `<li><span class="when">${fmtDate(c.start)}</span><span class="muted">${c.end ? `менструация ${dnum(c.end) - dnum(c.start) + 1} дн.` : ''}${newer ? `${c.end ? ', ' : ''}цикл ${dnum(newer.start) - dnum(c.start)} дн.` : `${c.end ? ', ' : ''}текущий цикл`}</span>
+      <button class="round sm" data-act="edit-cycle" data-id="${c.id}" aria-label="Изменить" title="Изменить">${ic('edit')}</button><button class="round sm" data-act="del-cycle" data-id="${c.id}" aria-label="Удалить" title="Удалить">${ic('trash')}</button></li>`;
+  }).join('');
+  app.innerHTML = `${pageHead('Цикл', 'Дневник менструаций. По нему приложение подбирает норму для анализов, которые зависят от фазы цикла.')}
+  <div class="card feature">${now ? `<div class="feature-head"><div><div class="muted">Сегодня</div><div class="big">${now.day}<small>день цикла</small></div></div>
+    <div class="feature-side"><span class="pill plain">${PHASES[now.phase]} фаза</span><span class="muted">Следующая менструация около ${fmtDate(next)}</span><span class="muted">Средний цикл ${st.avg} дн.${st.known ? '' : ' (пока по умолчанию)'}</span></div></div>${bar}`
+    : `<p class="muted">${cycles.length ? 'Последняя отметка была давно. Отметьте начало нового цикла, и появятся день цикла и фаза.' : 'Отметьте начало менструации или загрузите прошлые циклы.'}</p>`}</div>
+  <div class="toolbar"><button class="primary" data-act="cycle-today">Началась сегодня</button><button data-act="add-cycle">${ic('plus')}Другая дата</button><button data-act="import-cycles">${ic('up')}Загрузить прошлые циклы</button></div>
+  <p class="muted">Фаза считается по календарю: овуляция принимается за 14 дней до следующей менструации. Это оценка, а не медицинское заключение, и для предохранения она не подходит.</p>
+  ${cycles.length ? `<div class="card"><h3>История</h3><ul class="plain">${rows}</ul></div>` : ''}`;
+}
+function cycleForm(c) {
+  c = c || { start: today(), end: '', note: '' };
+  openDialog(`<h2>${c.id ? 'Менструация' : 'Новая отметка'}</h2>
+    <div class="two"><label>Первый день<input type="date" name="start" required max="${today()}" value="${esc(c.start)}"></label><label>Последний день (необязательно)<input type="date" name="end" max="${today()}" value="${esc(c.end)}"></label></div>
+    <label>Заметка<textarea name="note" rows="2">${esc(c.note)}</textarea></label>${actionsRow}`,
+  async f => { await DB.put('cycles', { id: c.id || uid(), start: f.elements.start.value, end: f.elements.end.value, note: f.elements.note.value.trim() }); });
+}
+function importCyclesForm() {
+  const form = openDialog(`<h2>Прошлые циклы</h2>
+    <p class="muted">Вставьте даты или выберите файл выгрузки (CSV, TXT, JSON). Подойдёт любой список: дата начала на строке, «начало – конец» или отметки по дням. Формат дат: 30.08.2026 или 2026-08-30.</p>
+    <label>Файл<input type="file" name="file" accept=".csv,.txt,.json,.tsv,text/*,application/json"></label>
+    <label>Или текст<textarea name="text" rows="7" placeholder="02.08.2026 - 06.08.2026&#10;30.08.2026 - 03.09.2026&#10;27.09.2026"></textarea></label>
+    <p class="hint" id="cyc-preview">Даты пока не найдены.</p>${actionsRow}`,
+  async f => { const n = await saveCycles(parseCycleDates(f.elements.text.value)); if (!n) throw new Error('новых дат не найдено'); });
+  const preview = () => { const l = parseCycleDates(form.elements.text.value); $('#cyc-preview', form).textContent = l.length ? `Найдено менструаций: ${l.length}, с ${fmtDate(l[0].start)} по ${fmtDate(l[l.length - 1].start)}. Уже записанные даты пропустим.` : 'Даты пока не найдены.'; };
+  form.elements.text.addEventListener('input', preview);
+  form.elements.file.addEventListener('change', async e => { if (e.target.files[0]) { form.elements.text.value = await e.target.files[0].text(); preview(); } });
 }
 
 // ---------- лекарства ----------
@@ -484,10 +606,10 @@ function viewIndicators(param) {
   app.innerHTML = `${pageHead('Показатели')}
   <div class="toolbar"><select id="ind" aria-label="Показатель">${list.map(s => `<option value="${esc(key(s.name))}" ${s === cur ? 'selected' : ''}>${esc(s.name)} (${s.pts.length})</option>`).join('')}</select><button data-act="print">Печать</button></div>
   <div class="card feature ${f}"><div class="feature-head"><div><div class="muted">${esc(cur.name)}, ${fmtDate(last.date)}</div><div class="big">${esc(last.value)}<small>${unitHtml(last.unit)}</small></div></div>
-    <div class="feature-side">${pill(f)}${rangeText(last) ? `<span class="muted">Норма ${esc(rangeText(last))}</span>` : ''}${prev ? `<span class="muted">${deltaText(last.value, prev.value)}</span>` : ''}</div></div>${chart(cur.pts)}</div>
+    <div class="feature-side">${pill(f)}${normText(last) ? `<span class="muted">Норма ${esc(normText(last))}</span>` : ''}${prev ? `<span class="muted">${deltaText(last.value, prev.value)}</span>` : ''}</div></div>${chart(cur.pts)}</div>
   <div class="card"><table><thead><tr><th>Дата</th><th>Значение</th><th>Изменение</th><th>Норма</th></tr></thead><tbody>${rows.map(({ r, prev: pr }) => {
     const fl = flag(r);
-    return `<tr><td>${fmtDate(r.date)}</td><td class="v ${fl}">${esc(r.value)} <small>${unitHtml(r.unit)}</small></td><td class="muted">${pr ? deltaText(r.value, pr.value) : ''}</td><td class="muted">${esc(rangeText(r))}</td></tr>`;
+    return `<tr><td>${fmtDate(r.date)}</td><td class="v ${fl}">${esc(r.value)} <small>${unitHtml(r.unit)}</small></td><td class="muted">${pr ? deltaText(r.value, pr.value) : ''}</td><td class="muted">${esc(normText(r))}</td></tr>`;
   }).join('')}</tbody></table></div>`;
   $('#ind').addEventListener('change', e => { location.hash = '#/indicators/' + enc(e.target.value); });
 }
@@ -600,6 +722,12 @@ function openDialog(html, onSubmit, preview = '') {
     try { await onSubmit(form); await gc(); dlg.close(); await load(); render(); } catch (err) { alert('Не удалось сохранить: ' + err.message); }
   });
   $('[data-close]', dlg).addEventListener('click', () => dlg.close());
+  form.addEventListener('invalid', e => {
+    e.target.scrollIntoView({ block: 'center' });
+    let m = form.querySelector('.form-err');
+    if (!m) { m = document.createElement('p'); m.className = 'hint warn form-err'; form.querySelector('.actions').before(m); }
+    m.textContent = e.target.name === 'date' ? 'Не сохранено: укажите дату (в документе она не нашлась).' : 'Не сохранено: заполните выделенное поле.';
+  }, true);
   dlg.showModal();
   dlg.scrollTop = 0;
   return form;
@@ -639,7 +767,8 @@ function resultRow(r = {}) {
     <input name="unit" placeholder="Ед." aria-label="Единица" value="${esc(r.unit)}"${w('unit')}>
     <input name="min" placeholder="Мин" aria-label="Норма от" value="${esc(r.min)}" inputmode="decimal"${w('min')}>
     <input name="max" placeholder="Макс" aria-label="Норма до" value="${esc(r.max)}" inputmode="decimal"${w('max')}>
-    <button type="button" class="round sm" data-rm aria-label="Убрать строку" title="Убрать строку">×</button></div>`;
+    <button type="button" class="round sm" data-rm aria-label="Убрать строку" title="Убрать строку">×</button>
+    <input name="phases" class="phases-in" placeholder="Нормы по фазам: фолликулиновая 2.4-12.6; овуляторная 14-96; лютеиновая 1-11.4" aria-label="Нормы по фазам цикла" value="${esc(phasesToText(r.phases))}" ${(r.phases || []).length ? '' : 'hidden'}></div>`;
 }
 function measureRow(m = {}) {
   return `<div class="row r3">
@@ -671,19 +800,22 @@ async function analysisForm(a, draft) {
     <div class="muted">Добавить набор</div>
     <div class="chips">${Object.keys(PANELS).map(n => `<button type="button" class="sm" data-panel="${esc(n)}">${esc(n)}</button>`).join('')}</div>
     ${a.results.some(r => r.warn) ? '<p class="hint warn">Жёлтым выделено то, что выглядит подозрительно (например, потерялась запятая). Проверьте по скану.</p>' : ''}
+    ${a.results.some(r => (r.phases || []).length) ? '<p class="hint">У части показателей норма зависит от фазы цикла. Фаза берётся из дневника цикла по дате анализа, или выберите её ниже.</p>' : ''}
     ${a.results.some(r => r.fromCatalog) ? '<p class="hint">Голубым выделена норма из справочника: в документе её нет. Поправьте, если ваша лаборатория даёт другую.</p>' : ''}
     <div class="row r5 head"><span>Показатель</span><span>Значение</span><span>Ед.</span><span>Мин</span><span>Макс</span><span></span></div>
     <div id="rows">${(a.results.length ? a.results : [{}]).map(resultRow).join('')}</div>
-    <button type="button" class="sm" data-addrow>${ic('plus')}Строка</button>
-    <label class="mt">Заметка<textarea name="note" rows="2">${esc(a.note)}</textarea></label>
+    <div class="chips"><button type="button" class="sm" data-addrow>${ic('plus')}Строка</button><button type="button" class="sm" data-showphases>Нормы по фазам цикла</button></div>
+    <label>Фаза цикла в день сдачи<select name="phase">${[['', 'Определить по дневнику цикла'], ['follicular', 'Фолликулиновая'], ['ovulatory', 'Овуляторная'], ['luteal', 'Лютеиновая'], ['postmeno', 'Постменопауза'], ['none', 'Не учитывать']].map(([k, t]) => `<option value="${k}" ${(a.phase || '') === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+    <label>Заметка<textarea name="note" rows="2">${esc(a.note)}</textarea></label>
     ${nextField(a.nextDate)}${filesBlock(a.files)}${actionsRow}`,
   async f => {
-    const results = readRows(f, '#rows .row', ['name', 'value', 'unit', 'min', 'max']).filter(r => r.name && r.value !== '');
+    const results = readRows(f, '#rows .row', ['name', 'value', 'unit', 'min', 'max', 'phases']).filter(r => r.name && r.value !== '').map(r => { const ph = parsePhaseRefs(r.phases); const o = { name: r.name, value: r.value, unit: r.unit, min: r.min, max: r.max }; if (ph.length) o.phases = ph; return o; });
     const files = await saveFiles(f, a.files);
-    await DB.put('analyses', { id: a.id || uid(), date: f.elements.date.value, lab: f.elements.lab.value.trim(), note: f.elements.note.value.trim(), nextDate: f.elements.nextDate.value, results, files });
+    await DB.put('analyses', { id: a.id || uid(), date: f.elements.date.value, lab: f.elements.lab.value.trim(), note: f.elements.note.value.trim(), nextDate: f.elements.nextDate.value, phase: f.elements.phase.value, results, files });
     if (draft) await DB.del('inbox', draft.id);
   }, await draftPreview(draft));
   const rows = $('#rows', form);
+  form.addEventListener('click', e => { if (e.target.closest('[data-showphases]')) rows.querySelectorAll('.phases-in').forEach(i => { i.hidden = false; }); });
   rowEvents(form, rows, resultRow);
   rows.addEventListener('change', e => {
     if (e.target.name !== 'name') return;
@@ -807,7 +939,9 @@ async function processInbox() {
 
 // ---------- резервные копии ----------
 async function makeSnapshot(auto, note = '') {
-  await DB.put('backups', { id: uid(), at: Date.now(), auto, note, analyses: await DB.all('analyses'), studies: await DB.all('studies'), conclusions: await DB.all('conclusions'), meds: await DB.all('meds') });
+  const snap = { id: uid(), at: Date.now(), auto, note };
+  for (const st of RECORDS) snap[st] = await DB.all(st);
+  await DB.put('backups', snap);
   const all = (await DB.all('backups')).sort((a, b) => b.at - a.at);
   for (const old of all.slice(5)) await DB.del('backups', old.id);
   await gc();
@@ -828,7 +962,7 @@ const blobToDataURL = b => new Promise((res, rej) => { const r = new FileReader(
 async function exportData() {
   const files = [];
   for (const f of await DB.all('files')) files.push({ id: f.id, name: f.name, type: f.type, data: await blobToDataURL(f.blob) });
-  const payload = { app: 'med-tracker', version: 4, exportedAt: new Date().toISOString(), analyses, studies, conclusions, meds, inbox, files };
+  const payload = { app: 'med-tracker', version: 4, exportedAt: new Date().toISOString(), analyses, studies, conclusions, meds, cycles, inbox, files };
   const name = `medtracker-backup-${today()}.json`;
   const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
   let saved = true;
@@ -877,6 +1011,11 @@ const actions = {
   'add-conclusion': () => conclusionForm(),
   'edit-conclusion': id => conclusionForm(conclusions.find(c => c.id === id)),
   'del-conclusion': id => confirm('Удалить это заключение?') && removeEntity('conclusions', id),
+  'cycle-today': async () => { const n = await saveCycles([{ start: today(), end: '' }]); if (!n) alert('Начало цикла рядом с этой датой уже отмечено.'); await load(); render(); },
+  'add-cycle': () => cycleForm(),
+  'edit-cycle': id => cycleForm(cycles.find(c => c.id === id)),
+  'del-cycle': async id => { if (confirm('Удалить эту отметку?')) { await DB.del('cycles', id); await load(); render(); } },
+  'import-cycles': importCyclesForm,
   'add-med': () => medForm(),
   'edit-med': id => medForm(meds.find(m => m.id === id)),
   'del-med': async id => { if (confirm('Удалить это лекарство из списка?')) { await DB.del('meds', id); await load(); render(); } },
@@ -927,7 +1066,7 @@ function render() {
   const [r = '', param = ''] = location.hash.replace(/^#\/?/, '').split('/');
   const p = decodeURIComponent(param);
   document.querySelectorAll('[data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === r));
-  const views = { scans: viewScans, analyses: viewAnalyses, indicators: () => viewIndicators(p), studies: () => viewStudies(p), conclusions: () => viewConclusions(p), meds: viewMeds, timeline: () => viewTimeline(p), summary: () => viewSummary(p), data: viewData, more: viewMore };
+  const views = { scans: viewScans, analyses: viewAnalyses, indicators: () => viewIndicators(p), studies: () => viewStudies(p), conclusions: () => viewConclusions(p), meds: viewMeds, cycle: viewCycle, timeline: () => viewTimeline(p), summary: () => viewSummary(p), data: viewData, more: viewMore };
   (views[r] || viewHome)();
   updateBadge();
 }

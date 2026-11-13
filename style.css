@@ -45,7 +45,7 @@ p { margin: 6px 0; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: -.02em; text-decoration: none; white-space: nowrap; }
 .mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--ink); color: var(--bg); }
 .nav-desk { display: none; gap: 2px; margin: 0 auto; background: var(--card); padding: 4px; border-radius: 99px; }
-.nav-desk a { padding: 7px 14px; border-radius: 99px; text-decoration: none; font-size: 14px; color: var(--muted); white-space: nowrap; }
+.nav-desk a { padding: 7px 11px; border-radius: 99px; text-decoration: none; font-size: 14px; color: var(--muted); white-space: nowrap; }
 .nav-desk a:hover { color: var(--ink); }
 .nav-desk a.on { background: var(--ink); color: var(--bg); }
 .top-actions { display: flex; gap: 8px; margin-left: auto; }
@@ -124,6 +124,15 @@ table.matrix td, table.matrix th { min-width: 110px; } table.matrix td:first-chi
 table.matrix th:first-child, table.matrix td:first-child { position: sticky; left: 0; background: var(--card); z-index: 1; padding-right: 8px; }
 table.matrix td.chg { background: var(--low-bg); border-radius: 8px; }
 table.matrix small { color: var(--muted); font-weight: 600; }
+
+.phases-in { grid-column: 1 / -1; font-size: 13px; }
+.cbar { position: relative; display: flex; height: 14px; border-radius: 99px; overflow: visible; margin: 18px 0 8px; background: var(--field); }
+.cbar i { display: block; height: 100%; } .cbar i:first-child { border-radius: 99px 0 0 99px; } .cbar i:nth-child(4) { border-radius: 0 99px 99px 0; flex: 1; }
+.men { background: #e7a39a; } .fol { background: var(--sky); } .ovu { background: var(--teal); } .lut { background: var(--lilac); }
+.cbar b { position: absolute; top: -5px; width: 6px; height: 24px; margin-left: -3px; border-radius: 99px; background: var(--ink); }
+.clegend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.clegend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; }
+.feature .big small { font-size: 14px; }
 
 /* обзор */
 .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 14px; }

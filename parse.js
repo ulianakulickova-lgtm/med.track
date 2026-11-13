@@ -105,6 +105,8 @@ function parseTail(tail) {
   const vLen = vm[1].length, vIdx = vm.index + vm[0].length - vLen;
   const value = tail.slice(vIdx, vIdx + vLen).replace(/\s+/g, '').replace(',', '.');
   const after = tail.slice(vIdx + vLen);
+  const tok = after.trim().split(/[\s;,]+/)[0] || '';
+  if (!unit && UNIT_BY_FOLD.has(fold(tok))) unit = UNIT_BY_FOLD.get(fold(tok));
   if (!unit) {
     const um = after.match(/^\s*([^\d<>≤≥(\[\]]{1,16}?)\s*(?=[\d<>≤≥(\[]|$)/);
     if (um) unit = cleanUnit(um[1]);
@@ -112,8 +114,25 @@ function parseTail(tail) {
   return { value, unit, ...parseRange(after) };
 }
 
+// Нормы, зависящие от фазы цикла: «фолликулиновая - 12,4-233; овуляторная - 41,0-398; лютеиновая - 22,3-341»
+const PHASE_STEMS = [['follicular', 'фолликул'], ['ovulatory', 'овулят'], ['luteal', 'лютеин'], ['postmeno', 'постменопауз']];
+function parsePhaseRefs(str) {
+  const out = [];
+  const re = new RegExp(`(фолликул[а-яё]*|овулят[а-яё]*|лютеин[а-яё]*|постменопауз[а-яё]*)(?:\\s+фаза)?[^0-9<>≤≥;]{0,12}?((?:[<>≤≥]\\s*)?${NUM}(?:\\s*[-–—]\\s*${NUM})?)`, 'gi');
+  let m;
+  while ((m = re.exec(pNorm(str)))) {
+    const id = PHASE_STEMS.find(([, st]) => m[1].startsWith(st))[0];
+    if (out.some(x => x.id === id)) continue;
+    const v = m[2].replace(/\s+/g, ''), r = parseRange(/[-–—]/.test(v) ? v : (/^[<≤]/.test(v) ? '< ' : /^[>≥]/.test(v) ? '> ' : '< ') + v.replace(/^[<>≤≥]/, ''));
+    out.push({ id, min: r.min, max: r.max });
+  }
+  return out;
+}
+
 // Что стоит перепроверить глазами: потерянная запятая, странная единица.
-function checkResult(r, item) {
+function checkResult(r, item, refText) {
+  const ph = parsePhaseRefs(refText || '');
+  if (ph.length >= 2) { r.phases = ph; r.min = ''; r.max = ''; item = item ? { ...item, min: null, max: null } : item; }
   const n = v => { const x = parseFloat(String(v).replace(/^[<>≤≥]/, '')); return Number.isNaN(x) ? null : x; };
   const warn = [];
   const known = UNIT_BY_FOLD.get(fold(r.unit));
@@ -170,7 +189,7 @@ function parseTable(lines) {
   const text = lines.map(l => l.cells.map(c => c.s).join(' ')).join('\n');
   const urine = /анализ мочи|исследование мочи/.test(pNorm(text));
   const out = [], seen = new Set();
-  let cols = null, row = null, prevY = null;
+  let cols = null, row = null, prevY = null, pend = null; // pend — строки нормы, стоящие выше строки со значением
   const valRe = new RegExp(`^[^0-9<>≤≥A-Za-zА-Яа-яЁё]*((?:[<>≤≥]\\s*)?${NUM})(.*)$`);
   const flush = () => {
     if (row && row.name.length && row.value) {
@@ -183,7 +202,7 @@ function parseTable(lines) {
       const k = pNorm(name);
       if (!seen.has(k) && (rawName.match(/[A-Za-zА-Яа-яЁё]/g) || []).length >= 2) {
         seen.add(k);
-        out.push(checkResult({ name, value: row.value, unit: unit || (m && !urine && !row.unit ? m.item.unit || '' : ''), ...parseRange(row.ref) }, urine ? null : m && m.item));
+        out.push(checkResult({ name, value: row.value, unit: unit || (m && !urine && !row.unit ? m.item.unit || '' : ''), ...parseRange(row.ref) }, urine ? null : m && m.item, row.ref));
       }
     }
     row = null;
@@ -215,23 +234,28 @@ function parseTable(lines) {
     prevY = line.y;
     const nameTxt = parts.name.join(' ').trim(), valTxt = parts.value.join(' ').trim();
     const vm = valTxt.match(valRe);
-    if (spanning || (valTxt && !vm)) { flush(); continue; }
+    if (spanning || (valTxt && !vm)) { flush(); pend = null; continue; }
     const value = vm ? vm[1].replace(/\s+/g, '').replace(',', '.') : '';
     const unitTxt = parts.unit.join(' ').trim() || (vm && !cols.some(c => c.kind === 'unit') ? vm[2].trim() : '');
     const refTxt = parts.ref.join(' ').trim();
     // продолжение многострочного названия: вплотную к предыдущей строке или по смыслу
     const joins = () => row && gap < 1.6 && (gap < 0.95 || /^[a-zа-яё(]/.test(nameTxt) || /[,\-–(]$/.test(row.name[row.name.length - 1] || ''));
+    const fresh = () => { flush(); row = { name: [nameTxt], value: '', unit: '', ref: pend && (line.y - pend.y) / H < 1.4 ? pend.text : '' }; pend = null; };
     if (nameTxt && value) {
-      if (row && !row.value && joins()) row.name.push(nameTxt); else { flush(); row = { name: [nameTxt], value: '', unit: '', ref: '' }; }
+      if (row && !row.value && joins()) row.name.push(nameTxt); else fresh();
       row.value = value;
     } else if (value) {
       if (row && !row.value && gap < 1.6) row.value = value; else continue;
     } else if (nameTxt) {
       if (/[A-Za-zА-Яа-яЁё]/.test(nameTxt)) {
-        if (joins()) row.name.push(nameTxt); else { flush(); row = { name: [nameTxt], value: '', unit: '', ref: '' }; }
+        if (joins()) row.name.push(nameTxt); else fresh();
       }
-    } else if (!row || gap >= 1.6) continue;
-    if (row) { if (unitTxt && !row.unit) row.unit = unitTxt; if (refTxt && !row.ref) row.ref = refTxt; }
+    } else if (!row || gap >= 1.4 || pend) {
+      // норма в несколько строк: верхние строки относятся к следующему показателю
+      if (refTxt) pend = { text: (pend && (line.y - pend.y) / H < 1.4 ? pend.text + ' ' : '') + refTxt, y: line.y };
+      continue;
+    }
+    if (row) { if (unitTxt && !row.unit) row.unit = unitTxt; if (refTxt) row.ref += (row.ref ? ' ' : '') + refTxt; if (pend) pend.y = line.y; }
   }
   flush();
   return out;
@@ -243,10 +267,13 @@ function parseLab(text) {
   const urine = /анализ мочи|исследование мочи/.test(pNorm(text));
   const out = [], seen = new Set();
   const add = r => { const k = pNorm(r.name); if (!seen.has(k)) { seen.add(k); out.push(r); } };
+  let lastRes = null, lastRef = '';
+  const rePhase = () => { if (lastRes) { const ph = parsePhaseRefs(lastRef); if (ph.length >= 2) { lastRes.phases = ph; lastRes.min = ''; lastRes.max = ''; delete lastRes.fromCatalog; delete lastRes.warn; } } };
   for (const rawLine of String(text).split(/\r?\n/)) {
     const raw = rawLine.replace(/\s+/g, ' ').trim();
     if (raw.length < 4) continue;
     const line = pNorm(raw);
+    if (lastRes && /^(референсн|фолликулинов|овуляторн|лютеинов|постменопауз|беременност)/.test(line)) { lastRef += ' ' + raw; rePhase(); continue; }
     const m = matchIndicator(fold(raw));
     if (m) {
       const tail = raw.slice(m.end).replace(/^[\s,]*\([^)]*\)/, '');
@@ -255,7 +282,8 @@ function parseLab(text) {
       let name = m.item.name;
       if (m.item.abs && (/10\^|тыс/.test(t.unit) || /абс/.test(line))) name = m.item.abs;
       if (urine) name += ' (моча)';
-      add(checkResult({ name, value: t.value, unit: t.unit || (urine ? '' : m.item.unit || ''), min: t.min, max: t.max }, urine ? null : m.item));
+      add(checkResult({ name, value: t.value, unit: t.unit || (urine ? '' : m.item.unit || ''), min: t.min, max: t.max }, urine ? null : m.item, tail));
+      lastRes = out[out.length - 1]; lastRef = tail;
       continue;
     }
     // строка не из справочника, но похожа на «Название значение ед. норма»
@@ -319,12 +347,31 @@ const normDims = v => v.replace(/\s*[xх×*]\s*/g, '×').replace(/,/g, '.');
 const ORGANS = /^(печень|желчный пузырь|желчевыводящие протоки|поджелудочная железа|селез[её]нка|почки|правая почка|левая почка|надпочечники|мочевой пузырь|мочеточники|щитовидная железа|правая доля|левая доля|перешеек|паращитовидные железы|матка|шейка матки|эндометрий|миометрий|правый яичник|левый яичник|яичники|маточные трубы|предстательная железа|семенные пузырьки|молочные железы|правая молочная железа|левая молочная железа|лимфатические узлы|регионарные лимфатические узлы|регионарные лимфоузлы|сердце|аорта|брюшная аорта|л[её]гкие|плевральные полости|средостение|головной мозг|желудочки мозга|гипофиз|позвоночник|спинной мозг|межпозвонковые диски|суставы|мягкие ткани|сосуды|вены|артерии|кости|придаточные пазухи носа)$/i;
 const NOT_SECTION = /^(заключение|рекомендаци|рекомендовано|врач|дата|подпис|протокол|описание|результат|исследование)/i;
 const GENERAL = /свободн[а-яё]+ жидкост|лимфатическ|лимфоузл|дополнительн|прочее/i;
+const BOILER = /^(на серии|на полученных|на рентгенограмм[еах]|исследование (выполнено|проведено)|методика|техника исследования|аппарат|датчик|эффективная доза|эд[\s:=]|доза[\s:=])/i;
+const PRED_NEG = /^(?:не|без|нет)$/;
+const PRED = new RegExp('^(?:(?:изменен|расширен|смещен|увеличен|уменьшен|утолщен|уплотнен|деформирован|пневматизирован|сохранен|выражен|сглажен|сужен|повышен|понижен|снижен|усилен|обеднен|представлен|расположен|закрыт|сомкнут|визуализирован|дифференцирован)[аоы]?$|симметричн|асимметричн|визуализиру|определя|локализ|свободн|прозрачн|структурн|дифференциру|проходим|неоднородн|однородн|обычн|типичн|неровн|ровн|нечетк|четк|средн|нормальн|правильн|округл|овальн|гомогенн|интенсивн|отсутств|имеет|имеют|содержит|прослежива|лоцир|пальпир|подвижн|эластичн|безболезненн|состоятельн|чист|соответству|(?:шириной|размером|размерами|диаметром|толщиной|длиной|объемом|высотой)$)');
+const DIM_START = /^(шириной|размером|размерами|диаметром|толщиной|длиной|объ[её]мом|высотой)\s/i;
+const TITLE_LINE = /^(ультразвуков|узи[\s,.]|мрт[\s,.]|мр-|магнитно|компьютерн|кт[\s,.]|мскт|рентген|флюорограф|экг|эхокг|эхокардио|маммограф|протокол|исследование)/i;
+const DIM_NOUN = { шириной: 'Ширина', размером: 'Размер', размерами: 'Размеры', диаметром: 'Диаметр', толщиной: 'Толщина', длиной: 'Длина', объемом: 'Объем', высотой: 'Высота' };
+// делим фразу на «что» и «какое»: «Корни легких | структурны», «Перешеек | 3 мм»
+function splitSP(clause) {
+  const w = tidy(clause).split(/\s+/), n = w.map(pNorm);
+  if (PRED_NEG.test(n[0]) || PRED.test(n[0])) return null; // фраза без подлежащего — продолжение предыдущей
+  const cut = i => ({ subj: w.slice(0, i).join(' '), pred: w.slice(i).join(' ') });
+  const neg = n.findIndex((t, i) => i > 0 && i <= 8 && PRED_NEG.test(t));
+  if (neg > 0) return cut(neg);
+  for (let i = 1; i < w.length && i <= 7; i++) {
+    const fullAdj = i === w.length - 1 && /(ые|ие|ая|яя|ое|ее|ый|ий|ой)$/.test(n[i]);
+    if (/^\d/.test(n[i]) || PRED.test(n[i]) || fullAdj) return cut(i);
+  }
+  return null;
+}
 // Параметры раскладываются по органам: «Печень: Контуры», «Желчный пузырь: Контуры».
 function parseFindings(text) {
   const out = [], seen = new Set();
   let section = '';
   const add = (group, name, value, unit = '') => {
-    name = tidy(name); value = tidy(value).replace(/\s+([.,;:])/g, '$1'); group = tidy(group);
+    name = tidy(name).replace(/^[^A-Za-zА-Яа-яЁё0-9]+/, ''); value = tidy(value).replace(/\s+([.,;:])/g, '$1').replace(/(\d)\s*[xх]\s*(?=\d)/g, '$1×'); group = tidy(group);
     if (!name || !value || name.length > 70 || value.length > 140 || !/[A-Za-zА-Яа-яЁё]{2}/.test(name)) return;
     const full = group && pNorm(group) !== pNorm(name) ? `${capFirst(group)}: ${capFirst(name)}` : capFirst(name);
     const k = pNorm(full);
@@ -345,7 +392,7 @@ function parseFindings(text) {
     if (line && prev && prev.includes(':') && !line.includes(':') && /^[а-яё(]/.test(line) && !/[.;]$/.test(prev)) joined[joined.length - 1] = prev + ' ' + line;
     else joined.push(line);
   }
-  const sentences = joined.join('\n').replace(/([.;])\s+(?=[А-ЯЁ])/g, '$1\n').split('\n');
+  const sentences = joined.join('\n').replace(/([.;])\s+(?=[^а-яёa-z\s])/g, '$1\n').split('\n');
   for (const raw of sentences) {
     const line = raw.trim().replace(/\s*[.;]$/, '');
     if (line.length < 3 || JUNK_LINE.test(line) || PATIENT_LINE.test(line)) continue;
@@ -362,7 +409,7 @@ function parseFindings(text) {
     if (cm) {
       let subject = tidy(cm[1]); const rest = cm[2];
       let group = section;
-      if (ORGANS.test(subject)) { section = group = sectionName(subject); subject = ''; }
+      if (ORGANS.test(subject)) { group = sectionName(subject); subject = ''; section = ''; }
       const kd = keyDimsRe.exec(subject); // «Размеры (31,2 х 24,6) : мм»
       if (kd) {
         add(group, kd[1], normDims(kd[2]), (rest.match(new RegExp('^' + M_UNIT, 'i')) || [])[1] || '');
@@ -398,25 +445,36 @@ function parseFindings(text) {
       }
       continue;
     }
-    // предложения без двоеточия: «Свободная жидкость не обнаружена», «Перешеек 3 мм»
-    const groupFor = name => {
-      if (GENERAL.test(name)) { section = ''; return ''; }
-      const w = name.split(/\s+/);
-      for (let n = Math.min(3, w.length); n > 0; n--) if (ORGANS.test(w.slice(0, n).join(' '))) return '';
-      return section;
-    };
-    const parts = line.split(/,\s+/);
-    const st = parts.map(pt => statusRe.exec(pt));
-    if (parts.length > 1 && st.every(Boolean)) { st.forEach(m => add(groupFor(m[1]), m[1], m[2])); continue; }
-    let found = false, m;
-    inlineRe.lastIndex = 0;
-    while ((m = inlineRe.exec(line))) {
-      if (/[xх×*]\s*$/.test(line.slice(0, m.index + m[1].length))) continue;
-      add(groupFor(m[1]), m[1], normDims(m[2]), m[3]); found = true;
+    // связный текст (МРТ, рентген): «Срединные структуры не смещены», «Гипофиз обычной формы, размером 10х5х12 мм»
+    if (BOILER.test(line) || TITLE_LINE.test(line)) continue;
+    const clauses = line.split(/,\s+/);
+    let group = section, last = null, first = true, owner = '';
+    const dimRe = new RegExp(`^(шириной|размером|размерами|диаметром|толщиной|длиной|объ[её]мом|высотой)\\s+(?:до\\s+)?(${DIMS})\\s*${M_UNIT}?(.*)$`, 'i');
+    const addDim = (g, d) => { add(g, DIM_NOUN[pNorm(d[1])] || d[1], normDims(d[2]), d[3]); if (tidy(d[4])) add(g, 'Описание', d[4]); };
+    for (const cl of clauses) {
+      const c = tidy(cl), before = out.length;
+      const dimOnly = dimRe.exec(c);
+      const sp = dimOnly ? null : splitSP(c);
+      if (dimOnly && (group || owner)) addDim(group || owner, dimOnly);
+      else if (sp) {
+        let name = sp.subj;
+        if (first && GENERAL.test(name)) { group = ''; section = ''; }
+        else if (first && ORGANS.test(name)) { group = sectionName(name); name = 'Состояние'; section = ''; }
+        if (first) owner = group || sp.subj;
+        const dim = dimRe.exec(sp.pred);
+        const bare2 = sp.pred.match(new RegExp(`^(${DIMS})\\s*${M_UNIT}?(.*)$`, 'i'));
+        if (dim) addDim(group ? group : name, dim);
+        else if (bare2 && !tidy(bare2[3])) add(group, name, normDims(bare2[1]), bare2[2]);
+        else add(group, name, sp.pred);
+      } else if (last && !last.unit) { last.value += ', ' + c; first = false; continue; }
+      else if (first) {
+        const w = line.split(/\s+/);
+        if (w.length >= 3) add(section, w.slice(0, 2).join(' '), w.slice(2).join(' '));
+        break;
+      }
+      last = out.length > before ? out[out.length - 1] : last;
+      first = false;
     }
-    if (found) continue;
-    const sm = statusRe.exec(line);
-    if (sm) add(groupFor(sm[1]), sm[1], sm[2]);
   }
   return out.slice(0, 120);
 }
@@ -439,7 +497,7 @@ function parseMeds(text) {
   }
   return out;
 }
-const PARSER_VERSION = 3;
+const PARSER_VERSION = 4;
 const DOC_KINDS = [['Выписка', ['выписной эпикриз', 'выписка']], ['Справка', ['справка']], ['Консультация', ['консультаци']], ['Осмотр', ['осмотр', 'прием врача']]];
 
 function analyzeText(text, todayIso, lines) {
@@ -494,4 +552,4 @@ function analyzeText(text, todayIso, lines) {
   };
 }
 
-if (typeof module !== 'undefined') module.exports = { analyzeText, parseLab, parseTable, parseDate, parseFindings, parseMeds, cleanText };
+if (typeof module !== 'undefined') module.exports = { parsePhaseRefs, analyzeText, parseLab, parseTable, parseDate, parseFindings, parseMeds, cleanText };

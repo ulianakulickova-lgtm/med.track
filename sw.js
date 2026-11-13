@@ -1,5 +1,5 @@
 // Офлайн-режим: библиотеки распознавания берём из кэша, остальное — из сети с запасным кэшем.
-const CACHE = 'med-tracker-v5';
+const CACHE = 'med-tracker-v6';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(
   caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())
