@@ -1,0 +1,4 @@
+# Резервные копии содержат медицинские данные — не коммитить!
+medtracker-backup-*.json
+*.backup.json
+.DS_Store
