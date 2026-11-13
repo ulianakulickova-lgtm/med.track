@@ -1,37 +1,48 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="light">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex,nofollow">
-<meta name="theme-color" content="#2563eb">
+<meta name="theme-color" content="#efefef">
 <title>Мои анализы</title>
+<script>try { document.documentElement.dataset.theme = localStorage.getItem('mt_theme') || 'light'; } catch (e) {}</script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css">
+<link rel="preload" href="vendor/fonts/montserrat-cyrillic-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
-<header>
-  <h1>Мои анализы</h1>
-  <nav>
-    <a href="#/">Обзор</a>
-    <a href="#/scans">Сканы<b id="scan-count"></b></a>
-    <a href="#/analyses">Анализы</a>
-    <a href="#/indicators">Показатели</a>
-    <a href="#/studies">Исследования</a>
-    <a href="#/conclusions">Заключения</a>
-    <a href="#/timeline">Хронология</a>
-    <a href="#/summary">Сводка</a>
-    <a href="#/data">Данные</a>
+<header class="top">
+  <a class="brand" href="#/"><span class="mark"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></span>Мои анализы</a>
+  <nav class="nav-desk" aria-label="Разделы">
+    <a data-nav="" href="#/">Обзор</a>
+    <a data-nav="analyses" href="#/analyses">Анализы</a>
+    <a data-nav="indicators" href="#/indicators">Показатели</a>
+    <a data-nav="studies" href="#/studies">Исследования</a>
+    <a data-nav="conclusions" href="#/conclusions">Заключения</a>
+    <a data-nav="timeline" href="#/timeline">Хронология</a>
+    <a data-nav="summary" href="#/summary">Сводка</a>
   </nav>
+  <div class="top-actions">
+    <a class="round" data-nav="scans" href="#/scans" aria-label="Сканы" title="Сканы"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V5M7 10l5-5 5 5M5 20h14"/></svg><b class="scan-count" hidden></b></a>
+    <a class="round" data-nav="more" href="#/more" aria-label="Все разделы" title="Все разделы"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1.5"/><rect x="14" y="4" width="6" height="6" rx="1.5"/><rect x="4" y="14" width="6" height="6" rx="1.5"/><rect x="14" y="14" width="6" height="6" rx="1.5"/></svg></a>
+  </div>
 </header>
 <main id="app"></main>
+<nav class="tabbar" aria-label="Основное меню">
+  <a data-nav="" href="#/" aria-label="Обзор"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg><span>Обзор</span></a>
+  <a data-nav="analyses" href="#/analyses" aria-label="Анализы"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/></svg><span>Анализы</span></a>
+  <label class="plus" aria-label="Загрузить сканы" title="Загрузить сканы"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><input type="file" class="scan-input" multiple accept="image/*,application/pdf" hidden></label>
+  <a data-nav="studies" href="#/studies" aria-label="Исследования"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 12h8"/></svg><span>Снимки</span></a>
+  <a data-nav="conclusions" href="#/conclusions" aria-label="Заключения врачей"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6v3H9z"/><path d="M9 5H5v15h14V5h-4M9 12h6M9 16h4"/></svg><span>Врачи</span></a>
+</nav>
 <dialog id="dlg"></dialog>
 <datalist id="catalog"></datalist>
-<script src="catalog.js"></script>
-<script src="parse.js"></script>
-<script src="ocr.js"></script>
-<script src="app.js"></script>
+<script src="catalog.js?v=3"></script>
+<script src="parse.js?v=3"></script>
+<script src="ocr.js?v=3"></script>
+<script src="app.js?v=3"></script>
 </body>
 </html>

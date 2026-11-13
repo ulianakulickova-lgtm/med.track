@@ -67,38 +67,49 @@ function matchIndicator(line) {
   for (const { item, syn: syns } of synFolded()) {
     for (const syn of syns) {
       const pos = findWord(line, syn);
-      if (pos < 0 || pos > 30) continue;
+      if (pos < 0 || pos > 60) continue;
+      const before = line.slice(0, pos);
+      if (/[a-zа-я]{4,}/.test(before) && !/\($/.test(before)) continue;
+      if (/^[\/]/.test(line.slice(pos + syn.length))) continue;
       if (!best || pos < best.pos || (pos === best.pos && syn.length > best.len)) best = { item, pos, len: syn.length, end: pos + syn.length };
     }
   }
   return best;
 }
 
-function parseTail(tail) {
-  let unit = '';
-  tail = tail.replace(/[xх×*]?\s*10\s*[\^*еe]?\s*(12|9|6|3)\s*\/\s*[лl]/i, (m0, p) => { unit = `10^${p}/л`; return ' '; });
-  const vm = tail.match(new RegExp(`(?:[<>≤≥]\\s*)?${NUM}`));
-  if (!vm) return null;
-  const value = vm[0].replace(/\s+/g, '').replace(',', '.');
-  const after = tail.slice(vm.index + vm[0].length);
-  if (!unit) {
-    const um = after.match(/^\s*([^\d<>≤≥(\[\]]{1,16}?)\s*(?=[\d<>≤≥(\[]|$)/);
-    if (um) {
-      const u = um[1].replace(/[↑↓*+!|]/g, ' ').replace(/\s*(не более|не менее|до|от|менее|более)\s*$/i, '').replace(/[\s\-–—:;,.]+$/, '').trim();
-      if (/[A-Za-zА-Яа-я%]/.test(u) && u.length <= 12 && !/\s\S+\s/.test(u)) unit = u;
-    }
-  }
+function parseRange(str) {
   let min = '', max = '';
-  const fix = s => s.replace(',', '.');
-  const r = after.match(new RegExp(`(${NUM})\\s*[-–—−]\\s*(${NUM})`));
+  const fix = x => x.replace(',', '.');
+  const r = str.match(new RegExp(`(${NUM})\\s*[-–—−]\\s*(${NUM})`));
   if (r) { min = fix(r[1]); max = fix(r[2]); }
   else {
-    const lt = after.match(new RegExp(`(?:<|≤|до|менее|не более)\\s*=?\\s*(${NUM})`, 'i'));
-    const gt = after.match(new RegExp(`(?:>|≥|от|более|не менее)\\s*=?\\s*(${NUM})`, 'i'));
+    const lt = str.match(new RegExp(`(?:<|≤|до|менее|не более)\\s*=?\\s*(${NUM})`, 'i'));
+    const gt = str.match(new RegExp(`(?:>|≥|от|более|не менее)\\s*=?\\s*(${NUM})`, 'i'));
     if (lt) max = fix(lt[1]);
     if (gt) min = fix(gt[1]);
   }
-  return { value, unit, min, max };
+  return { min, max };
+}
+function cleanUnit(raw) {
+  const u = String(raw || '').replace(/[↑↓*+!|]/g, ' ').replace(/\s*(не более|не менее|до|от|менее|более)\s*$/i, '').replace(/[\s\-–—:;,.]+$/, '').replace(/^[\s\-–—:;,.]+/, '').trim();
+  return /[A-Za-zА-Яа-я%]/.test(u) && u.length <= 12 && !/\s\S+\s/.test(u) ? u : '';
+}
+
+function parseTail(tail) {
+  let unit = '';
+  tail = tail.replace(/[xх×*]?\s*10\s*[\^*еe]?\s*(12|9|6|3)\s*\/\s*[лl]/i, (m0, p) => { unit = `10^${p}/л`; return ' '; });
+  // Значение — число, стоящее отдельно. «25» в «25-гидрокси» или «B12» — часть названия, а не результат.
+  const strict = new RegExp(`(?:^|[\\s:;|])((?:[<>≤≥]\\s*)?${NUM})(?![.,]?\\d)(?![-–][A-Za-zА-Яа-яЁё])`);
+  const vm = tail.match(strict);
+  if (!vm) return null;
+  const vLen = vm[1].length, vIdx = vm.index + vm[0].length - vLen;
+  const value = tail.slice(vIdx, vIdx + vLen).replace(/\s+/g, '').replace(',', '.');
+  const after = tail.slice(vIdx + vLen);
+  if (!unit) {
+    const um = after.match(/^\s*([^\d<>≤≥(\[\]]{1,16}?)\s*(?=[\d<>≤≥(\[]|$)/);
+    if (um) unit = cleanUnit(um[1]);
+  }
+  return { value, unit, ...parseRange(after) };
 }
 
 // Что стоит перепроверить глазами: потерянная запятая, странная единица.
@@ -111,8 +122,119 @@ function checkResult(r, item) {
   if (item && item.max != null && max !== null && (max > item.max * 4 || max < item.max / 4)) warn.push('min', 'max');
   const refMax = warn.includes('max') ? item.max : max, refMin = warn.includes('max') ? item.min : min;
   if (v !== null && ((refMax != null && refMax > 0 && v > refMax * 4) || (refMin != null && refMin > 0 && v < refMin / 4))) warn.push('value');
+  if (item && r.min === '' && r.max === '' && (item.min != null || item.max != null) && fold(r.unit) === fold(item.unit || '')) {
+    r.min = item.min != null ? String(item.min) : ''; r.max = item.max != null ? String(item.max) : ''; r.fromCatalog = true;
+  }
   if (warn.length) r.warn = warn;
   return r;
+}
+
+// ---------- таблица: раскладываем слова по колонкам «Наименование / Результат / Ед. / Норма» ----------
+const HEADER_KINDS = [
+  ['ref', /норм|референс|интервал/], ['unit', /ед\.?\s*изм|единиц|^ед\.?$/], ['flag', /флаг|отклонен/],
+  ['value', /результат|значение/], ['name', /наименован|исследован|показател|тест|анализ|параметр|компонент/],
+];
+function toCells(line) {
+  const out = [];
+  for (const c of [...line.cells].sort((a, b) => a.x0 - b.x0)) {
+    const last = out[out.length - 1];
+    if (last && c.x0 - last.x1 < line.h * 0.75) { last.s += ' ' + c.s; last.x1 = Math.max(last.x1, c.x1); } else out.push({ ...c });
+  }
+  return out;
+}
+const headerKind = c => (c.s.length > 40 ? null : (HEADER_KINDS.find(([, re]) => re.test(pNorm(c.s))) || [])[0]);
+// Заголовок таблицы часто перенесён на две-три строки («Нормальные / значения»), поэтому смотрим и на соседние.
+function detectHeader(cells, nearby) {
+  if (cells.length < 2 || cells.length > 8 || cells.some(c => c.s.length > 40)) return null;
+  const cols = [];
+  for (const c of cells) {
+    const kind = headerKind(c);
+    if (kind && !cols.some(x => x.kind === kind)) cols.push({ kind, x0: c.x0, x1: c.x1 });
+  }
+  if (!cols.some(c => c.kind === 'value') || cols.length < 2) return null;
+  for (const c of nearby || []) {
+    const kind = headerKind(c);
+    if (kind && kind !== 'value' && !cols.some(x => x.kind === kind || (c.x0 < x.x1 && c.x1 > x.x0))) cols.push({ kind, x0: c.x0, x1: c.x1 });
+  }
+  cols.sort((a, b) => a.x0 - b.x0);
+  cols.forEach((c, i) => {
+    c.left = i ? (cols[i - 1].x1 + c.x0) / 2 : -Infinity;
+    c.right = i < cols.length - 1 ? (c.x1 + cols[i + 1].x0) / 2 : Infinity;
+  });
+  if (cols[0].kind !== 'name') { cols[0].left = cols[0].x0 - 4; cols.unshift({ kind: 'name', left: -Infinity, right: cols[0].left }); }
+  return cols;
+}
+function parseTable(lines) {
+  if (!lines || !lines.length) return [];
+  const hs = lines.map(l => l.h).sort((a, b) => a - b), H = hs[Math.floor(hs.length / 2)] || 10;
+  const text = lines.map(l => l.cells.map(c => c.s).join(' ')).join('\n');
+  const urine = /анализ мочи|исследование мочи/.test(pNorm(text));
+  const out = [], seen = new Set();
+  let cols = null, row = null, prevY = null;
+  const valRe = new RegExp(`^[^0-9<>≤≥A-Za-zА-Яа-яЁё]*((?:[<>≤≥]\\s*)?${NUM})(.*)$`);
+  const flush = () => {
+    if (row && row.name.length && row.value) {
+      const rawName = row.name.join(' ').replace(/\s+/g, ' ').replace(/[\s,.:;\-–]+$/, '').trim();
+      const m = matchIndicator(fold(rawName));
+      let name = m ? m.item.name : rawName;
+      const unit = cleanUnit(row.unit.replace(/[xх×*]?\s*10\s*[\^*еe]?\s*(12|9|6|3)\s*\/\s*[лl]/i, '10^$1/л')) || (/10\^/.test(row.unit) ? row.unit.match(/10\^\d+\/л/)[0] : '');
+      if (m && m.item.abs && (/10\^|тыс/.test(unit) || /абс/.test(pNorm(rawName)))) name = m.item.abs;
+      if (urine) name += ' (моча)';
+      const k = pNorm(name);
+      if (!seen.has(k) && (rawName.match(/[A-Za-zА-Яа-яЁё]/g) || []).length >= 2) {
+        seen.add(k);
+        out.push(checkResult({ name, value: row.value, unit: unit || (m && !urine && !row.unit ? m.item.unit || '' : ''), ...parseRange(row.ref) }, urine ? null : m && m.item));
+      }
+    }
+    row = null;
+  };
+  const all = lines.map(l => ({ line: l, cells: toCells(l) }));
+  let skipUntil = -Infinity;
+  for (let i = 0; i < all.length; i++) {
+    const { line, cells } = all[i];
+    if (!cells.length) continue;
+    const near = all.filter((x, j) => j !== i && Math.abs(x.line.y - line.y) < H * 1.7).flatMap(x => x.cells);
+    const hdr = detectHeader(cells, near);
+    if (hdr) { flush(); cols = hdr; prevY = line.y; skipUntil = line.y + H * 1.7; continue; }
+    if (!cols) continue;
+    if (line.y < skipUntil && cells.every(c => headerKind(c) || c.s.length <= 2)) continue; // хвост заголовка
+    const valueCol = cols.find(c => c.kind === 'value'), nameCol = cols[0];
+    const parts = { name: [], value: [], unit: [], ref: [], flag: [] };
+    let spanning = false;
+    for (const c of cells) {
+      if (c.x0 < nameCol.right) {
+        parts.name.push(c.s);
+        if (c.x1 > (valueCol.x0 + valueCol.x1) / 2) spanning = true; // строка во всю ширину — подзаголовок или примечание
+      } else {
+        const mid = (c.x0 + c.x1) / 2;
+        const col = cols.find(k => mid >= k.left && mid < k.right) || cols[cols.length - 1];
+        parts[col.kind === 'name' ? 'value' : col.kind].push(c.s);
+      }
+    }
+    const gap = prevY === null ? 99 : (line.y - prevY) / H;
+    prevY = line.y;
+    const nameTxt = parts.name.join(' ').trim(), valTxt = parts.value.join(' ').trim();
+    const vm = valTxt.match(valRe);
+    if (spanning || (valTxt && !vm)) { flush(); continue; }
+    const value = vm ? vm[1].replace(/\s+/g, '').replace(',', '.') : '';
+    const unitTxt = parts.unit.join(' ').trim() || (vm && !cols.some(c => c.kind === 'unit') ? vm[2].trim() : '');
+    const refTxt = parts.ref.join(' ').trim();
+    // продолжение многострочного названия: вплотную к предыдущей строке или по смыслу
+    const joins = () => row && gap < 1.6 && (gap < 0.95 || /^[a-zа-яё(]/.test(nameTxt) || /[,\-–(]$/.test(row.name[row.name.length - 1] || ''));
+    if (nameTxt && value) {
+      if (row && !row.value && joins()) row.name.push(nameTxt); else { flush(); row = { name: [nameTxt], value: '', unit: '', ref: '' }; }
+      row.value = value;
+    } else if (value) {
+      if (row && !row.value && gap < 1.6) row.value = value; else continue;
+    } else if (nameTxt) {
+      if (/[A-Za-zА-Яа-яЁё]/.test(nameTxt)) {
+        if (joins()) row.name.push(nameTxt); else { flush(); row = { name: [nameTxt], value: '', unit: '', ref: '' }; }
+      }
+    } else if (!row || gap >= 1.6) continue;
+    if (row) { if (unitTxt && !row.unit) row.unit = unitTxt; if (refTxt && !row.ref) row.ref = refTxt; }
+  }
+  flush();
+  return out;
 }
 
 const NOT_RESULT = /дата|возраст|пол(?![а-яё])|тел\.|телефон|заказ|лиценз|стр\.|страниц|адрес|инн|паспорт|полис|снилс|№|номер|пациент|врач|год|лет(?![а-яё])/i;
@@ -195,10 +317,11 @@ function parseMeasures(text) {
   return out.slice(0, 20);
 }
 
-function analyzeText(text, todayIso) {
+function analyzeText(text, todayIso, lines) {
   text = String(text || '');
   const t = pNorm(text);
-  const results = parseLab(text);
+  const table = parseTable(lines);
+  const results = table.length ? table : parseLab(text);
   const st = earliest(t, STUDY_TYPES);
   const visitScore = ['жалобы', 'анамнез', 'объективно', 'осмотр', 'консультаци', 'диагноз', 'прием врача'].filter(k => t.includes(k)).length;
   let kind = '';
@@ -233,4 +356,4 @@ function analyzeText(text, todayIso) {
   };
 }
 
-if (typeof module !== 'undefined') module.exports = { analyzeText, parseLab, parseDate, parseMeasures };
+if (typeof module !== 'undefined') module.exports = { analyzeText, parseLab, parseTable, parseDate, parseMeasures };

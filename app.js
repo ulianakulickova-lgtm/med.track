@@ -8,10 +8,36 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString
 const isoLocal = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const today = () => isoLocal(new Date());
 const fmtDate = d => (d ? new Date(d + 'T00:00:00').toLocaleDateString('ru-RU') : 'без даты');
+const fmtStamp = t => new Date(t).toLocaleString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 const num = v => { const n = parseFloat(String(v ?? '').replace(',', '.').replace(/^[<>≤≥\s]+/, '')); return Number.isNaN(n) ? null : n; };
 const key = n => String(n ?? '').trim().toLowerCase().replace(/ё/g, 'е');
 const enc = encodeURIComponent;
 const byDateDesc = (a, b) => (b.date || '').localeCompare(a.date || '');
+const WEEK = 7 * 864e5;
+const store = {
+  get(k) { try { return localStorage.getItem('mt_' + k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem('mt_' + k, v); } catch (e) { /* приватный режим */ } },
+};
+
+const ICONS = {
+  home: '<path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/>',
+  drop: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.500 6-11 6-11z"/>',
+  pulse: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+  scan: '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 12h8"/>',
+  doc: '<path d="M9 4h6v3H9z"/><path d="M9 5H5v15h14V5h-4M9 12h6M9 16h4"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  file: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 13h6M9 17h6"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  shield: '<path d="M12 3l8 3v6c0 4.500-3.400 8-8 9-4.600-1-8-4.500-8-9V6z"/>',
+  grid: '<rect x="4" y="4" width="6" height="6" rx="1.500"/><rect x="14" y="4" width="6" height="6" rx="1.500"/><rect x="4" y="14" width="6" height="6" rx="1.500"/><rect x="14" y="14" width="6" height="6" rx="1.500"/>',
+  edit: '<path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/>',
+  trash: '<path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13"/>',
+  cal: '<path d="M5 5h14v15H5zM5 10h14M9 3v4M15 3v4"/>',
+  clip: '<path d="M9 12l5-5a2.500 2.500 0 0 1 3.500 3.500l-7 7a4 4 0 0 1-5.700-5.700l7-7"/>',
+  up: '<path d="M12 16V5M7 10l5-5 5 5M5 20h14"/>',
+  right: '<path d="M9 6l6 6-6 6"/>',
+};
+const ic = n => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]}</svg>`;
 
 function flag(r) {
   const v = num(r.value), min = num(r.min), max = num(r.max);
@@ -20,36 +46,41 @@ function flag(r) {
   if (max !== null && v > max) return 'high';
   return 'ok';
 }
-const arrow = f => (f === 'low' ? '↓' : f === 'high' ? '↑' : '');
-const FLAG_TXT = { low: '↓ ниже нормы', high: '↑ выше нормы', ok: 'в норме' };
+const unitHtml = u => esc(u).replace(/10\^12/, '10¹²').replace(/10\^9/, '10⁹').replace(/10\^6/, '10⁶').replace(/10\^3/, '10³');
+const FLAG_TXT = { low: 'Ниже нормы', high: 'Выше нормы', ok: 'В норме' };
+const pill = f => (f ? `<span class="pill ${f}">${FLAG_TXT[f]}</span>` : '');
 function rangeText(r) {
   const min = num(r.min), max = num(r.max);
   if (min !== null && max !== null) return `${min}–${max}`;
-  if (max !== null) return `≤ ${max}`;
-  if (min !== null) return `≥ ${min}`;
+  if (max !== null) return `до ${max}`;
+  if (min !== null) return `от ${min}`;
   return '';
 }
 function deltaText(cur, prev) {
   const a = num(cur), b = num(prev);
   if (a === null || b === null) return '';
   const d = +(a - b).toFixed(2);
-  if (d === 0) return '=';
+  if (d === 0) return 'без изменений';
   return `${d > 0 ? '+' : '−'}${Math.abs(d)}${b ? ` (${d > 0 ? '+' : '−'}${Math.abs(Math.round(d / b * 100))}%)` : ''}`;
 }
 
 // ---------- хранилище (IndexedDB) ----------
-const STORES = ['analyses', 'studies', 'conclusions', 'files', 'inbox'];
+// Версию базы можно только повышать. При обновлении приложения существующие записи не трогаются:
+// onupgradeneeded лишь добавляет недостающие хранилища.
+const STORES = ['analyses', 'studies', 'conclusions', 'files', 'inbox', 'backups'];
+const RECORDS = ['analyses', 'studies', 'conclusions'];
 const DB = (() => {
   let db;
   const open = () => new Promise((res, rej) => {
-    const r = indexedDB.open('med-tracker', 2);
+    const r = indexedDB.open('med-tracker', 3);
     r.onupgradeneeded = () => STORES.forEach(s => { if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' }); });
-    r.onsuccess = () => { db = r.result; res(); };
+    r.onsuccess = () => { db = r.result; db.onversionchange = () => db.close(); res(); };
     r.onerror = () => rej(r.error);
+    r.onblocked = () => rej(new Error('закройте другие вкладки с приложением и обновите страницу'));
   });
-  const run = (store, mode, fn) => new Promise((res, rej) => {
-    const t = db.transaction(store, mode);
-    const rq = fn(t.objectStore(store));
+  const run = (s, mode, fn) => new Promise((res, rej) => {
+    const t = db.transaction(s, mode);
+    const rq = fn(t.objectStore(s));
     t.oncomplete = () => res(rq && rq.result);
     t.onerror = () => rej(t.error);
     t.onabort = () => rej(t.error);
@@ -57,6 +88,7 @@ const DB = (() => {
   return {
     open,
     all: s => run(s, 'readonly', st => st.getAll()),
+    keys: s => run(s, 'readonly', st => st.getAllKeys()),
     get: (s, id) => run(s, 'readonly', st => st.get(id)),
     put: (s, o) => run(s, 'readwrite', st => st.put(o)),
     del: (s, id) => run(s, 'readwrite', st => st.delete(id)),
@@ -64,12 +96,24 @@ const DB = (() => {
   };
 })();
 
-let analyses = [], studies = [], conclusions = [], inbox = [];
+let analyses = [], studies = [], conclusions = [], inbox = [], backups = [];
 async function load() {
   analyses = (await DB.all('analyses')).sort(byDateDesc);
   studies = (await DB.all('studies')).sort(byDateDesc);
   conclusions = (await DB.all('conclusions')).sort(byDateDesc);
   inbox = (await DB.all('inbox')).sort((a, b) => a.addedAt - b.addedAt);
+  backups = (await DB.all('backups')).sort((a, b) => b.at - a.at);
+}
+const hasData = () => analyses.length + studies.length + conclusions.length > 0;
+
+// Файлы удаляем, только когда на них не ссылается ни одна запись и ни одна точка восстановления
+async function gc() {
+  const used = new Set();
+  const add = r => (r.files || []).forEach(f => used.add(f.id));
+  for (const s of RECORDS) (await DB.all(s)).forEach(add);
+  (await DB.all('inbox')).forEach(d => used.add(d.fileId));
+  (await DB.all('backups')).forEach(b => RECORDS.forEach(s => (b[s] || []).forEach(add)));
+  for (const id of await DB.keys('files')) if (!used.has(id)) await DB.del('files', id);
 }
 
 // перенос записей из первой версии приложения
@@ -96,7 +140,7 @@ function seriesMap() {
   }));
   return m;
 }
-const studyTitle = s => `${s.type || 'Исследование'}${s.area ? ' · ' + s.area : ''}`;
+const studyTitle = s => `${s.type || 'Исследование'}${s.area ? ', ' + s.area.toLowerCase() : ''}`;
 const studyKey = s => `${key(s.type)}|${key(s.area)}`;
 function studySeries() {
   const m = new Map();
@@ -108,71 +152,91 @@ function studySeries() {
   return m;
 }
 
-// ---------- график ----------
+// ---------- графики ----------
+function smoothPath(p) {
+  if (p.length < 2) return '';
+  let d = `M${p[0][0]},${p[0][1]}`;
+  for (let i = 0; i < p.length - 1; i++) {
+    const a = p[i - 1] || p[i], b = p[i], c = p[i + 1], e = p[i + 2] || c;
+    d += ` C${b[0] + (c[0] - a[0]) / 7},${b[1] + (c[1] - a[1]) / 7} ${c[0] - (e[0] - b[0]) / 7},${c[1] - (e[1] - b[1]) / 7} ${c[0]},${c[1]}`;
+  }
+  return d;
+}
+let chartId = 0;
 function chart(pts) {
   const p = pts.map(x => ({ t: new Date(x.date).getTime(), v: num(x.value), f: flag(x), d: x.date, u: x.unit })).filter(x => x.v !== null && !Number.isNaN(x.t));
   if (!p.length) return '<p class="muted">Нет числовых значений для графика.</p>';
   const last = pts[pts.length - 1];
   const bmin = num(last.min), bmax = num(last.max);
-  const W = 640, H = 240, L = 48, R = 16, T = 16, B = 34;
+  const W = 460, H = 240, L = 40, R = 16, T = 28, B = 34, id = 'g' + (++chartId);
   const xs = p.map(x => x.t), x0 = Math.min(...xs), x1 = Math.max(...xs);
   const X = t => (x1 === x0 ? L + (W - L - R) / 2 : L + (t - x0) / (x1 - x0) * (W - L - R));
   let lo = Math.min(...p.map(x => x.v), bmin ?? Infinity), hi = Math.max(...p.map(x => x.v), bmax ?? -Infinity);
   if (lo === hi) { lo -= 1; hi += 1; }
-  const pad = (hi - lo) * 0.12; lo -= pad; hi += pad;
+  const pad = (hi - lo) * 0.14, floor = lo >= 0 ? 0 : -Infinity; lo = Math.max(floor, lo - pad); hi += pad;
   const Y = v => T + (hi - v) / (hi - lo) * (H - T - B);
   const fmt = v => (Math.abs(v) >= 100 ? v.toFixed(0) : +v.toFixed(2));
-  let s = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="График">`;
-  for (let i = 0; i <= 4; i++) {
-    const v = lo + (hi - lo) * i / 4, y = Y(v);
-    s += `<line class="gridline" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${fmt(v)}</text>`;
-  }
+  const xy = p.map(x => [+X(x.t).toFixed(1), +Y(x.v).toFixed(1)]);
+  let s = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="График"><defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="g0"/><stop offset="1" class="g1"/></linearGradient></defs>`;
   if (bmin !== null || bmax !== null) {
     const y1 = Y(bmax ?? hi), y2 = Y(bmin ?? lo);
-    s += `<rect class="band" x="${L}" y="${y1}" width="${W - L - R}" height="${Math.max(0, y2 - y1)}"/>`;
+    s += `<rect class="band" x="${L}" y="${y1}" width="${W - L - R}" height="${Math.max(0, y2 - y1)}" rx="10"/>`;
   }
-  s += `<polyline class="line" points="${p.map(x => `${X(x.t)},${Y(x.v)}`).join(' ')}"/>`;
-  p.forEach(x => { s += `<circle class="dot ${x.f}" cx="${X(x.t)}" cy="${Y(x.v)}" r="5"><title>${fmtDate(x.d)}: ${x.v} ${esc(x.u || '')}</title></circle>`; });
-  const first = p[0], lastP = p[p.length - 1];
-  s += `<text x="${X(first.t)}" y="${H - 10}" text-anchor="${p.length > 1 ? 'start' : 'middle'}">${fmtDate(first.d)}</text>`;
-  if (p.length > 1) s += `<text x="${X(lastP.t)}" y="${H - 10}" text-anchor="end">${fmtDate(lastP.d)}</text>`;
+  for (let i = 0; i <= 3; i++) {
+    const v = lo + (hi - lo) * i / 3, y = Y(v);
+    s += `<line class="gridline" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/><text x="${L - 8}" y="${y + 4}" text-anchor="end">${fmt(v)}</text>`;
+  }
+  if (xy.length > 1) {
+    const d = smoothPath(xy);
+    s += `<path d="${d} L${xy[xy.length - 1][0]},${H - B} L${xy[0][0]},${H - B} Z" fill="url(#${id})"/><path class="line" d="${d}"/>`;
+  }
+  p.forEach((x, i) => { s += `<circle class="dot ${x.f}" cx="${xy[i][0]}" cy="${xy[i][1]}" r="${i === p.length - 1 ? 6 : 4.5}"><title>${fmtDate(x.d)}: ${x.v} ${esc(x.u || '')}</title></circle>`; });
+  const lp = xy[xy.length - 1];
+  s += `<text class="val" x="${Math.min(lp[0], W - R - 4)}" y="${lp[1] - 12}" text-anchor="end">${p[p.length - 1].v}</text>`;
+  s += `<text x="${xy[0][0]}" y="${H - 10}" text-anchor="${p.length > 1 ? 'start' : 'middle'}">${fmtDate(p[0].d)}</text>`;
+  if (p.length > 1) s += `<text x="${lp[0]}" y="${H - 10}" text-anchor="end">${fmtDate(p[p.length - 1].d)}</text>`;
   return s + '</svg>';
+}
+function spark(pts) {
+  const v = pts.map(x => num(x.value)).filter(x => x !== null);
+  if (v.length < 2) return '<svg class="spark" viewBox="0 0 120 36" aria-hidden="true"><circle cx="110" cy="18" r="4"/></svg>';
+  const lo = Math.min(...v), hi = Math.max(...v), W = 120, H = 36;
+  const xy = v.map((y, i) => [+(6 + i / (v.length - 1) * (W - 12)).toFixed(1), +(hi === lo ? H / 2 : 6 + (hi - y) / (hi - lo) * (H - 12)).toFixed(1)]);
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" aria-hidden="true"><path d="${smoothPath(xy)}"/><circle cx="${xy[xy.length - 1][0]}" cy="${xy[xy.length - 1][1]}" r="4"/></svg>`;
 }
 
 // ---------- карточки ----------
 const app = $('#app');
-const fileLinks = files => (files || []).map(f => `<a class="file" data-act="open-file" data-id="${f.id}">📎 ${esc(f.name)}</a>`).join('');
-const nextBadge = r => (r.nextDate ? `<span class="badge ${r.nextDate < today() ? 'over' : ''}">Контроль: ${fmtDate(r.nextDate)}</span>` : '');
-const cardBtns = (kind, id) => `<div class="btns"><button class="sm" data-act="edit-${kind}" data-id="${id}">Изменить</button><button class="sm danger" data-act="del-${kind}" data-id="${id}">Удалить</button></div>`;
+const fileLinks = files => ((files || []).length ? `<div class="files">${files.map(f => `<a class="file" data-act="open-file" data-id="${f.id}">${ic('clip')}${esc(f.name)}</a>`).join('')}</div>` : '');
+const nextBadge = r => (r.nextDate ? `<span class="pill ${r.nextDate < today() ? 'high' : 'plain'}">Контроль ${fmtDate(r.nextDate)}</span>` : '');
+const cardBtns = (kind, id) => `<div class="btns"><button class="round sm" data-act="edit-${kind}" data-id="${id}" aria-label="Изменить" title="Изменить">${ic('edit')}</button><button class="round sm" data-act="del-${kind}" data-id="${id}" aria-label="Удалить" title="Удалить">${ic('trash')}</button></div>`;
 const block = (title, text) => (text ? `<h4>${title}</h4><p class="note">${esc(text)}</p>` : '');
+const recHead = (icon, tint, title, sub, btns) => `<div class="rec-head"><span class="ico ${tint}">${ic(icon)}</span><div class="rec-title"><h3>${title}</h3><div class="muted">${sub}</div></div>${btns}</div>`;
 
 function resultsTable(a) {
   if (!(a.results || []).length) return '';
   return `<table><thead><tr><th>Показатель</th><th>Значение</th><th>Норма</th></tr></thead><tbody>${a.results.map(r => {
     const f = flag(r);
-    return `<tr><td><a href="#/indicators/${enc(key(r.name))}">${esc(r.name)}</a></td><td class="${f}">${esc(r.value)} ${esc(r.unit)} ${arrow(f)}</td><td class="muted">${esc(rangeText(r))}</td></tr>`;
+    return `<tr><td><a href="#/indicators/${enc(key(r.name))}">${esc(r.name)}</a></td><td class="v ${f}">${esc(r.value)} <small>${unitHtml(r.unit)}</small></td><td class="muted">${esc(rangeText(r))}</td></tr>`;
   }).join('')}</tbody></table>`;
 }
 function analysisCard(a) {
   const bad = (a.results || []).filter(r => ['low', 'high'].includes(flag(r))).length;
-  return `<div class="card"><div class="card-head"><div><h3>${fmtDate(a.date)}${a.lab ? ' · ' + esc(a.lab) : ''}</h3>
-    <div class="muted">Показателей: ${(a.results || []).length}${bad ? `, вне нормы: ${bad}` : ''} ${nextBadge(a)}</div></div>${cardBtns('analysis', a.id)}</div>
-    ${resultsTable(a)}${a.note ? `<p class="note">${esc(a.note)}</p>` : ''}<div>${fileLinks(a.files)}</div></div>`;
+  return `<article class="card">${recHead('drop', 'sky', `Анализ от ${fmtDate(a.date)}`, `${esc(a.lab || 'Лаборатория не указана')}${bad ? `, вне нормы: ${bad}` : ''} ${nextBadge(a)}`, cardBtns('analysis', a.id))}
+    ${resultsTable(a)}${a.note ? `<p class="note">${esc(a.note)}</p>` : ''}${fileLinks(a.files)}</article>`;
 }
 function measuresTable(s) {
   if (!(s.measures || []).length) return '';
-  return `<table><tbody>${s.measures.map(m => `<tr><td>${esc(m.name)}</td><td>${esc(m.value)} ${esc(m.unit)}</td></tr>`).join('')}</tbody></table>`;
+  return `<table><tbody>${s.measures.map(m => `<tr><td>${esc(m.name)}</td><td class="v">${esc(m.value)} <small>${unitHtml(m.unit)}</small></td></tr>`).join('')}</tbody></table>`;
 }
 function studyCard(s) {
-  return `<div class="card"><div class="card-head"><div><h3><a href="#/studies/${enc(studyKey(s))}">${esc(studyTitle(s))}</a></h3>
-    <div class="muted">${fmtDate(s.date)}${s.clinic ? ' · ' + esc(s.clinic) : ''}${s.doctor ? ' · ' + esc(s.doctor) : ''} ${nextBadge(s)}</div></div>${cardBtns('study', s.id)}</div>
+  return `<article class="card">${recHead('scan', 'lilac', `<a href="#/studies/${enc(studyKey(s))}">${esc(studyTitle(s))}</a>`, `${fmtDate(s.date)}${s.clinic ? ', ' + esc(s.clinic) : ''}${s.doctor ? ', ' + esc(s.doctor) : ''} ${nextBadge(s)}`, cardBtns('study', s.id))}
     ${block('Заключение', s.conclusion)}${measuresTable(s)}${block('Рекомендации', s.recs)}
-    ${s.description ? `<details><summary>Описание (протокол)</summary><p class="note">${esc(s.description)}</p></details>` : ''}<div>${fileLinks(s.files)}</div></div>`;
+    ${s.description ? `<details><summary>Описание (протокол)</summary><p class="note">${esc(s.description)}</p></details>` : ''}${fileLinks(s.files)}</article>`;
 }
 function conclusionCard(c) {
-  return `<div class="card"><div class="card-head"><div><h3>${esc(c.specialty || 'Врач')}${c.doctor ? ' · ' + esc(c.doctor) : ''}</h3>
-    <div class="muted">${fmtDate(c.date)}${c.clinic ? ' · ' + esc(c.clinic) : ''} ${nextBadge(c)}</div></div>${cardBtns('conclusion', c.id)}</div>
-    ${block('Диагноз', c.diagnosis)}${block('Заключение', c.text)}${block('Рекомендации', c.recs)}<div>${fileLinks(c.files)}</div></div>`;
+  return `<article class="card">${recHead('doc', 'green', esc(c.specialty || 'Врач'), `${fmtDate(c.date)}${c.doctor ? ', ' + esc(c.doctor) : ''}${c.clinic ? ', ' + esc(c.clinic) : ''} ${nextBadge(c)}`, cardBtns('conclusion', c.id))}
+    ${block('Диагноз', c.diagnosis)}${block('Заключение', c.text)}${block('Рекомендации', c.recs)}${fileLinks(c.files)}</article>`;
 }
 
 // ---------- контроль (что и когда повторить) ----------
@@ -195,53 +259,69 @@ function exportIcs() {
 }
 
 // ---------- представления ----------
-const uploadBtn = (cls = 'primary') => `<label class="btn ${cls}">Загрузить сканы<input type="file" class="scan-input" multiple accept="image/*,application/pdf" hidden></label>`;
+const uploadBtn = (cls = 'primary', text = 'Загрузить сканы') => `<label class="btn ${cls}">${ic('up')}${text}<input type="file" class="scan-input" multiple accept="image/*,application/pdf" hidden></label>`;
+const pageHead = (title, sub = '') => `<div class="page-head"><h2>${title}</h2>${sub ? `<p class="muted">${sub}</p>` : ''}</div>`;
+
+function backupDue() {
+  if (store.get('auto') === 'off' || !hasData()) return false;
+  const now = Date.now();
+  return now - (+store.get('lastFile') || 0) > WEEK && now > (+store.get('snooze') || 0);
+}
 
 function viewHome() {
   const sm = seriesMap();
-  const bad = [...sm.values()].map(s => ({ name: s.name, last: s.pts[s.pts.length - 1] })).filter(x => ['low', 'high'].includes(flag(x.last)));
+  const series = [...sm.values()].map(s => ({ ...s, last: s.pts[s.pts.length - 1] }));
+  const bad = series.filter(x => ['low', 'high'].includes(flag(x.last)));
+  const tiles = [...bad, ...series.filter(x => !bad.includes(x)).sort((a, b) => byDateDesc(a.last, b.last))].slice(0, 6);
   const up = upcoming();
   const recent = [
     ...analyses.map(a => ({ date: a.date, html: analysisCard(a) })),
     ...studies.map(s => ({ date: s.date, html: studyCard(s) })),
     ...conclusions.map(c => ({ date: c.date, html: conclusionCard(c) })),
   ].sort(byDateDesc).slice(0, 3);
-  app.innerHTML = `<h2>Обзор</h2>
-  <div class="grid">
-    <a class="card stat" href="#/analyses"><b>${analyses.length}</b>анализов</a>
-    <a class="card stat" href="#/indicators"><b>${sm.size}</b>показателей</a>
-    <a class="card stat" href="#/studies"><b>${studies.length}</b>исследований</a>
-    <a class="card stat" href="#/conclusions"><b>${conclusions.length}</b>заключений</a>
-  </div>
-  <div class="toolbar">${uploadBtn()}<button data-act="add-analysis">+ Анализ</button><button data-act="add-study">+ Исследование</button><button data-act="add-conclusion">+ Заключение врача</button></div>
-  ${inbox.length ? `<div class="card accent"><b>Сканы ждут проверки: ${inbox.length}</b> <a href="#/scans">Перейти</a></div>` : ''}
-  ${up.length ? `<div class="card"><div class="card-head"><h3>Контроль</h3><button class="sm" data-act="ics">В календарь (.ics)</button></div><table><tbody>${up.map(u => `<tr><td class="${u.date < today() ? 'high' : ''}">${fmtDate(u.date)}${u.date < today() ? ' · просрочено' : ''}</td><td>${esc(u.label)}</td><td><button class="sm" data-act="done-next" data-id="${u.store}:${u.id}">Готово</button></td></tr>`).join('')}</tbody></table></div>` : ''}
-  <div class="card"><h3>Последние значения вне нормы</h3>${bad.length ? `<table><thead><tr><th>Показатель</th><th>Значение</th><th>Норма</th><th>Дата</th></tr></thead><tbody>${bad.map(x => {
-    const f = flag(x.last);
-    return `<tr><td><a href="#/indicators/${enc(key(x.name))}">${esc(x.name)}</a></td><td class="${f}">${esc(x.last.value)} ${esc(x.last.unit)} ${arrow(f)}</td><td class="muted">${esc(rangeText(x.last))}</td><td class="muted">${fmtDate(x.last.date)}</td></tr>`;
-  }).join('')}</tbody></table>` : '<p class="muted">Нет значений вне нормы.</p>'}</div>
-  <h3>Последние записи</h3>${recent.map(x => x.html).join('') || '<div class="empty">Пока пусто. Загрузите скан или добавьте запись вручную.</div>'}`;
+  const dateLine = new Date().toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+  const stat = (href, tint, icon, n, label) => `<a class="stat ${tint}" href="${href}"><span class="ico white">${ic(icon)}</span><b>${n}</b><span>${label}</span></a>`;
+  app.innerHTML = `<div class="page-head hero"><p class="muted cap">${dateLine}</p><h2>${bad.length ? `Вне нормы: ${bad.length} из ${series.length}` : series.length ? 'Все показатели в норме' : 'Соберите здесь свои анализы'}</h2></div>
+  ${backupDue() ? `<div class="banner cream"><div><b>Пора сохранить резервную копию</b><div class="muted">${+store.get('lastFile') ? 'Прошла неделя с прошлой копии.' : 'Копии в файл ещё не было.'} Файл пригодится, если данные браузера сотрутся.</div></div><div class="btns"><button class="primary" data-act="export">Сохранить</button><button data-act="snooze">Позже</button></div></div>` : ''}
+  ${inbox.length ? `<a class="banner sky" href="#/scans"><b>Сканы ждут проверки: ${inbox.length}</b>${ic('right')}</a>` : ''}
+  <div class="stats">${stat('#/analyses', 'sky', 'drop', analyses.length, 'анализы')}${stat('#/indicators', 'green', 'pulse', sm.size, 'показатели')}${stat('#/studies', 'lilac', 'scan', studies.length, 'исследования')}${stat('#/conclusions', 'cream', 'doc', conclusions.length, 'заключения')}</div>
+  <div class="toolbar">${uploadBtn()}<button data-act="add-analysis">${ic('plus')}Анализ</button><button data-act="add-study">${ic('plus')}Исследование</button><button data-act="add-conclusion">${ic('plus')}Заключение</button></div>
+  ${tiles.length ? `<div class="sec-head"><h3>Показатели</h3><a href="#/indicators">Все</a></div><div class="tiles">${tiles.map(s => {
+    const f = flag(s.last);
+    return `<a class="tile ${f}" href="#/indicators/${enc(key(s.name))}"><span class="t-name">${esc(s.name)}</span><span class="t-val">${esc(s.last.value)}<small>${unitHtml(s.last.unit)}</small></span>${spark(s.pts)}<span class="t-foot">${pill(f) || `<span class="muted">${fmtDate(s.last.date)}</span>`}</span></a>`;
+  }).join('')}</div>` : ''}
+  ${up.length ? `<div class="card teal"><div class="sec-head"><h3>${ic('cal')}Контроль</h3><button class="sm" data-act="ics">В календарь</button></div><ul class="plain">${up.map(u => `<li><span class="when ${u.date < today() ? 'late' : ''}">${fmtDate(u.date)}</span><span>${esc(u.label)}${u.date < today() ? ', просрочено' : ''}</span><button class="sm" data-act="done-next" data-id="${u.store}:${u.id}">Готово</button></li>`).join('')}</ul></div>` : ''}
+  <div class="sec-head"><h3>Последние записи</h3><a href="#/timeline">Хронология</a></div>${recent.map(x => x.html).join('') || '<div class="empty">Загрузите скан или добавьте запись вручную: появятся графики и сводка.</div>'}`;
+}
+
+function viewMore() {
+  const item = (href, tint, icon, title, sub) => `<a class="more ${tint}" href="${href}"><span class="ico white">${ic(icon)}</span><b>${title}</b><span class="muted">${sub}</span></a>`;
+  app.innerHTML = `${pageHead('Разделы')}<div class="more-grid">
+    ${item('#/indicators', 'green', 'pulse', 'Показатели', 'Графики и динамика')}
+    ${item('#/conclusions', 'cream', 'doc', 'Заключения врачей', 'Диагнозы и рекомендации')}
+    ${item('#/timeline', 'sky', 'clock', 'Хронология', 'Вся история по годам')}
+    ${item('#/summary', 'lilac', 'file', 'Сводка для врача', 'Одна страница для приёма')}
+    ${item('#/scans', 'sky', 'up', 'Сканы', inbox.length ? `Ждут проверки: ${inbox.length}` : 'Загрузка и распознавание')}
+    ${item('#/data', 'green', 'shield', 'Копии и настройки', 'Резервные копии, тема')}</div>`;
 }
 
 const KIND = { analysis: 'Анализ', study: 'Исследование', visit: 'Заключение врача' };
 function draftCard(d) {
-  const status = { queued: 'В очереди на распознавание', processing: 'Распознаётся…', ready: 'Готово к проверке', error: 'Текст не распознан — заполните вручную' }[d.status];
+  const status = { queued: 'В очереди на распознавание', processing: 'Распознаётся…', ready: 'Готово к проверке', error: 'Текст не распознан, заполните вручную' }[d.status];
   let body = '';
   if (d.status === 'processing') body = `<progress id="prog-${d.id}" max="1" value="0"></progress>`;
   if (d.status === 'ready' || d.status === 'error') {
     const p = d.parsed || {};
-    const hint = d.kind ? `Похоже на: <b>${KIND[d.kind].toLowerCase()}</b>${p.date ? ' от ' + fmtDate(p.date) : ', дата не найдена'}${d.kind === 'analysis' ? `, показателей: ${p.results.length}` : ''}` : 'Тип документа не определён — выберите сами';
-    body = `<p class="muted">${d.status === 'error' ? esc(d.error || '') : hint}</p><div class="toolbar"><span class="muted">Сохранить как:</span>
+    const hint = d.kind ? `Похоже на ${{ analysis: 'анализ', study: 'исследование', visit: 'заключение врача' }[d.kind]}${p.date ? ' от ' + fmtDate(p.date) : ', дата не найдена'}${d.kind === 'analysis' ? `, показателей: ${p.results.length}` : ''}` : 'Тип документа не определён, выберите сами';
+    body = `<p class="muted">${d.status === 'error' ? esc(d.error || '') : hint}</p><div class="chips"><span class="muted">Сохранить как</span>
       ${Object.keys(KIND).map(k => `<button class="sm ${d.kind === k ? 'primary' : ''}" data-act="draft-${k}" data-id="${d.id}">${KIND[k]}</button>`).join('')}</div>`;
   }
-  return `<div class="card"><div class="card-head"><div><h3><a class="file" data-act="open-file" data-id="${d.fileId}">📎 ${esc(d.name)}</a></h3><div class="muted">${status}</div></div>
-    <div class="btns"><button class="sm danger" data-act="del-draft" data-id="${d.id}">Удалить</button></div></div>${body}</div>`;
+  return `<article class="card">${recHead('file', 'sky', `<a data-act="open-file" data-id="${d.fileId}">${esc(d.name)}</a>`, status, `<div class="btns"><button class="round sm" data-act="del-draft" data-id="${d.id}" aria-label="Удалить" title="Удалить">${ic('trash')}</button></div>`)}${body}</article>`;
 }
 function viewScans() {
-  app.innerHTML = `<h2>Сканы</h2>
-  <label class="drop" id="drop"><b>Перетащите сюда файлы или нажмите, чтобы выбрать</b><span class="muted">Фото, сканы, PDF. Можно сразу много, в том числе старые — дату приложение возьмёт из документа, и её можно поправить.</span>
+  app.innerHTML = `${pageHead('Сканы', 'Распознавание идёт на вашем устройстве, файлы никуда не отправляются.')}
+  <label class="drop" id="drop"><span class="ico white">${ic('up')}</span><b>Выберите или перетащите файлы</b><span class="muted">Фото, сканы, PDF. Можно сразу много, в том числе старые: дата берётся из документа.</span>
     <input type="file" class="scan-input" multiple accept="image/*,application/pdf" hidden></label>
-  <p class="muted">Распознавание идёт на вашем устройстве, файлы никуда не отправляются. Оно может ошибаться, поэтому перед сохранением сверяйте значения со сканом.</p>
   ${inbox.map(draftCard).join('') || '<div class="empty">Нет сканов, ожидающих проверки.</div>'}`;
   const drop = $('#drop');
   drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
@@ -250,7 +330,7 @@ function viewScans() {
 }
 
 function listView(title, items, card, toolbar, searchText, emptyText) {
-  app.innerHTML = `<h2>${title}</h2><div class="toolbar"><input type="search" id="q" placeholder="Поиск…">${toolbar}</div><div id="list"></div>`;
+  app.innerHTML = `${pageHead(title)}<div class="toolbar"><input type="search" id="q" placeholder="Поиск" aria-label="Поиск">${toolbar}</div><div id="list"></div>`;
   const draw = () => {
     const q = key($('#q').value);
     const f = items.filter(x => !q || key(searchText(x)).includes(q));
@@ -259,24 +339,25 @@ function listView(title, items, card, toolbar, searchText, emptyText) {
   $('#q').addEventListener('input', draw);
   draw();
 }
-const viewAnalyses = () => listView('Анализы', analyses, analysisCard, `<button class="primary" data-act="add-analysis">+ Анализ</button>${uploadBtn('')}`,
-  a => [fmtDate(a.date), a.lab, a.note, ...(a.results || []).map(r => r.name)].join(' '), 'Анализов пока нет.');
-const viewConclusions = () => listView('Заключения врачей', conclusions, conclusionCard, `<button class="primary" data-act="add-conclusion">+ Заключение</button>${uploadBtn('')}`,
+const viewAnalyses = () => listView('Анализы', analyses, analysisCard, `<button class="primary" data-act="add-analysis">${ic('plus')}Анализ</button>`,
+  a => [fmtDate(a.date), a.lab, a.note, ...(a.results || []).map(r => r.name)].join(' '), 'Анализов пока нет. Загрузите скан кнопкой «+» или добавьте вручную.');
+const viewConclusions = () => listView('Заключения врачей', conclusions, conclusionCard, `<button class="primary" data-act="add-conclusion">${ic('plus')}Заключение</button>`,
   c => [fmtDate(c.date), c.specialty, c.doctor, c.clinic, c.diagnosis, c.text, c.recs].join(' '), 'Заключений пока нет.');
 
 function viewIndicators(param) {
   const sm = seriesMap();
   const list = [...sm.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
-  if (!list.length) { app.innerHTML = '<h2>Показатели</h2><div class="empty">Сначала добавьте анализ.</div>'; return; }
+  if (!list.length) { app.innerHTML = `${pageHead('Показатели')}<div class="empty">Сначала добавьте анализ.</div>`; return; }
   const cur = sm.get(param) || list[0];
+  const last = cur.pts[cur.pts.length - 1], prev = cur.pts[cur.pts.length - 2], f = flag(last);
   const rows = cur.pts.map((r, i) => ({ r, prev: cur.pts[i - 1] })).reverse();
-  const hasBand = num(cur.pts[cur.pts.length - 1].min) !== null || num(cur.pts[cur.pts.length - 1].max) !== null;
-  app.innerHTML = `<h2>Показатели</h2>
-  <div class="toolbar"><select id="ind">${list.map(s => `<option value="${esc(key(s.name))}" ${s === cur ? 'selected' : ''}>${esc(s.name)} (${s.pts.length})</option>`).join('')}</select><button data-act="print">Печать</button></div>
-  <div class="card"><h3>${esc(cur.name)}</h3>${chart(cur.pts)}${hasBand ? '<p class="muted">Зелёная полоса — норма из последнего анализа.</p>' : ''}</div>
-  <div class="card"><table><thead><tr><th>Дата</th><th>Значение</th><th>Изменение</th><th>Норма</th><th></th></tr></thead><tbody>${rows.map(({ r, prev }) => {
-    const f = flag(r);
-    return `<tr><td>${fmtDate(r.date)}</td><td class="${f}">${esc(r.value)} ${esc(r.unit)} ${arrow(f)}</td><td class="muted">${prev ? deltaText(r.value, prev.value) : ''}</td><td class="muted">${esc(rangeText(r))}</td><td class="muted">${FLAG_TXT[f] || ''}</td></tr>`;
+  app.innerHTML = `${pageHead('Показатели')}
+  <div class="toolbar"><select id="ind" aria-label="Показатель">${list.map(s => `<option value="${esc(key(s.name))}" ${s === cur ? 'selected' : ''}>${esc(s.name)} (${s.pts.length})</option>`).join('')}</select><button data-act="print">Печать</button></div>
+  <div class="card feature ${f}"><div class="feature-head"><div><div class="muted">${esc(cur.name)}, ${fmtDate(last.date)}</div><div class="big">${esc(last.value)}<small>${unitHtml(last.unit)}</small></div></div>
+    <div class="feature-side">${pill(f)}${rangeText(last) ? `<span class="muted">Норма ${esc(rangeText(last))}</span>` : ''}${prev ? `<span class="muted">${deltaText(last.value, prev.value)}</span>` : ''}</div></div>${chart(cur.pts)}</div>
+  <div class="card"><table><thead><tr><th>Дата</th><th>Значение</th><th>Изменение</th><th>Норма</th></tr></thead><tbody>${rows.map(({ r, prev: pr }) => {
+    const fl = flag(r);
+    return `<tr><td>${fmtDate(r.date)}</td><td class="v ${fl}">${esc(r.value)} <small>${unitHtml(r.unit)}</small></td><td class="muted">${pr ? deltaText(r.value, pr.value) : ''}</td><td class="muted">${esc(rangeText(r))}</td></tr>`;
   }).join('')}</tbody></table></div>`;
   $('#ind').addEventListener('change', e => { location.hash = '#/indicators/' + enc(e.target.value); });
 }
@@ -288,13 +369,11 @@ function viewStudies(param) {
     const groups = [...sm.values()].sort((a, b) => byDateDesc(a.items[a.items.length - 1], b.items[b.items.length - 1]));
     listView('Исследования', groups, g => {
       const last = g.items[g.items.length - 1];
-      return `<a class="card link" href="#/studies/${enc(g.key)}"><div class="card-head"><h3>${esc(g.title)}</h3><span class="badge">${g.items.length}</span></div>
-        <div class="muted">Последнее: ${fmtDate(last.date)}</div>${last.conclusion ? `<p class="note clip">${esc(last.conclusion)}</p>` : ''}</a>`;
-    }, `<button class="primary" data-act="add-study">+ Исследование</button>${uploadBtn('')}`,
+      return `<a class="card link" href="#/studies/${enc(g.key)}">${recHead('scan', 'lilac', esc(g.title), `Последнее ${fmtDate(last.date)}, всего ${g.items.length}`, ic('right'))}${last.conclusion ? `<p class="note clip">${esc(last.conclusion)}</p>` : ''}</a>`;
+    }, `<button class="primary" data-act="add-study">${ic('plus')}Исследование</button>`,
     g => [g.title, ...g.items.map(s => [s.conclusion, s.clinic, s.doctor, fmtDate(s.date)].join(' '))].join(' '), 'Исследований пока нет. УЗИ, МРТ, рентген и другие собираются здесь по видам.');
     return;
   }
-  // динамика по одному виду исследования
   const items = cur.items;
   const names = new Map();
   items.forEach(s => (s.measures || []).forEach(m => { if (m.name && !names.has(key(m.name))) names.set(key(m.name), m.name); }));
@@ -303,19 +382,19 @@ function viewStudies(param) {
     return pts.filter(p => num(p.value) !== null).length >= 2 ? `<div class="card"><h3>${esc(name)}${pts[0].unit ? ', ' + esc(pts[0].unit) : ''}</h3>${chart(pts)}</div>` : '';
   }).join('');
   const opts = sel => items.map((s, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${fmtDate(s.date)}</option>`).join('');
-  app.innerHTML = `<h2>${esc(cur.title)}</h2>
-  <div class="toolbar"><a class="btn" href="#/studies">← Все исследования</a><button class="primary" data-act="add-study" data-id="${esc(cur.key)}">+ Добавить</button><button data-act="print">Печать</button></div>
-  ${items.length > 1 ? `<div class="card"><h3>Сравнение</h3><div class="two"><select id="cmpA">${opts(items.length - 2)}</select><select id="cmpB">${opts(items.length - 1)}</select></div><div id="cmp"></div></div>` : '<p class="muted">Когда исследований этого вида станет два и больше, здесь появятся сравнение и графики.</p>'}
-  ${charts}<h3>Все исследования</h3>${[...items].reverse().map(studyCard).join('')}`;
+  app.innerHTML = `${pageHead(esc(cur.title))}
+  <div class="toolbar"><a class="btn" href="#/studies">Все исследования</a><button class="primary" data-act="add-study" data-id="${esc(cur.key)}">${ic('plus')}Добавить</button><button data-act="print">Печать</button></div>
+  ${items.length > 1 ? `<div class="card lilac"><h3>Сравнение</h3><div class="two"><select id="cmpA" aria-label="Первая дата">${opts(items.length - 2)}</select><select id="cmpB" aria-label="Вторая дата">${opts(items.length - 1)}</select></div><div id="cmp"></div></div>` : '<p class="muted">Когда исследований этого вида станет два и больше, здесь появятся сравнение и графики.</p>'}
+  ${charts}<div class="sec-head"><h3>Все исследования</h3></div>${[...items].reverse().map(studyCard).join('')}`;
   if (items.length > 1) {
     const draw = () => {
       const a = items[+$('#cmpA').value], b = items[+$('#cmpB').value];
       const rows = [...names.entries()].map(([k, name]) => {
         const ma = (a.measures || []).find(x => key(x.name) === k), mb = (b.measures || []).find(x => key(x.name) === k);
-        return `<tr><td>${esc(name)}</td><td>${ma ? esc(ma.value) + ' ' + esc(ma.unit) : '—'}</td><td>${mb ? esc(mb.value) + ' ' + esc(mb.unit) : '—'}</td><td class="muted">${ma && mb ? deltaText(mb.value, ma.value) : ''}</td></tr>`;
+        return `<tr><td>${esc(name)}</td><td>${ma ? esc(ma.value) + ' ' + esc(ma.unit) : ''}</td><td>${mb ? esc(mb.value) + ' ' + esc(mb.unit) : ''}</td><td class="muted">${ma && mb ? deltaText(mb.value, ma.value) : ''}</td></tr>`;
       }).join('');
       $('#cmp').innerHTML = `${rows ? `<table><thead><tr><th>Измерение</th><th>${fmtDate(a.date)}</th><th>${fmtDate(b.date)}</th><th>Изменение</th></tr></thead><tbody>${rows}</tbody></table>` : ''}
-        <div class="two cmp"><div><h4>${fmtDate(a.date)}</h4><p class="note">${esc(a.conclusion || '—')}</p></div><div><h4>${fmtDate(b.date)}</h4><p class="note">${esc(b.conclusion || '—')}</p></div></div>`;
+        <div class="two cmp"><div><h4>${fmtDate(a.date)}</h4><p class="note">${esc(a.conclusion || 'Заключение не указано')}</p></div><div><h4>${fmtDate(b.date)}</h4><p class="note">${esc(b.conclusion || 'Заключение не указано')}</p></div></div>`;
     };
     $('#cmpA').addEventListener('change', draw); $('#cmpB').addEventListener('change', draw);
     draw();
@@ -324,17 +403,17 @@ function viewStudies(param) {
 
 function viewTimeline(param) {
   const all = [
-    ...analyses.map(a => ({ k: 'analysis', date: a.date, icon: '🧪', title: 'Анализы' + (a.lab ? ' · ' + a.lab : ''), sub: `показателей: ${(a.results || []).length}`, html: analysisCard(a) })),
-    ...studies.map(s => ({ k: 'study', date: s.date, icon: '🩻', title: studyTitle(s), sub: s.conclusion || '', html: studyCard(s) })),
-    ...conclusions.map(c => ({ k: 'visit', date: c.date, icon: '🩺', title: c.specialty || 'Врач', sub: c.diagnosis || c.text || '', html: conclusionCard(c) })),
+    ...analyses.map(a => ({ k: 'analysis', date: a.date, icon: 'drop', tint: 'sky', title: 'Анализы' + (a.lab ? ', ' + a.lab : ''), sub: `показателей: ${(a.results || []).length}`, html: analysisCard(a) })),
+    ...studies.map(s => ({ k: 'study', date: s.date, icon: 'scan', tint: 'lilac', title: studyTitle(s), sub: s.conclusion || '', html: studyCard(s) })),
+    ...conclusions.map(c => ({ k: 'visit', date: c.date, icon: 'doc', tint: 'green', title: c.specialty || 'Врач', sub: c.diagnosis || c.text || '', html: conclusionCard(c) })),
   ].filter(x => !param || x.k === param).sort(byDateDesc);
   const chips = [['', 'Всё'], ['analysis', 'Анализы'], ['study', 'Исследования'], ['visit', 'Заключения']];
-  let html = `<h2>Хронология</h2><div class="chips">${chips.map(([k, t]) => `<a class="btn sm ${param === k ? 'primary' : ''}" href="#/timeline${k ? '/' + k : ''}">${t}</a>`).join('')}</div>`;
+  let html = `${pageHead('Хронология')}<div class="chips">${chips.map(([k, t]) => `<a class="btn sm ${param === k ? 'primary' : ''}" href="#/timeline${k ? '/' + k : ''}">${t}</a>`).join('')}</div>`;
   let year = '';
   all.forEach(x => {
     const y = (x.date || '').slice(0, 4) || 'Без даты';
     if (y !== year) { year = y; html += `<h3 class="year">${y}</h3>`; }
-    html += `<details class="tl"><summary><span class="tl-date">${fmtDate(x.date)}</span><span>${x.icon} <b>${esc(x.title)}</b> <span class="muted clip1">${esc(x.sub)}</span></span></summary>${x.html}</details>`;
+    html += `<details class="tl"><summary><span class="ico ${x.tint}">${ic(x.icon)}</span><span class="tl-main"><b>${esc(x.title)}</b><span class="muted clip1">${esc(x.sub)}</span></span><span class="tl-date">${fmtDate(x.date).slice(0, 5)}</span></summary>${x.html}</details>`;
   });
   app.innerHTML = html + (all.length ? '' : '<div class="empty">Записей пока нет.</div>');
 }
@@ -345,32 +424,39 @@ function viewSummary(param) {
   let from = '';
   if (m) { const d = new Date(); d.setMonth(d.getMonth() - m); from = isoLocal(d); }
   const inP = x => !from || (x.date || '') >= from;
+  const isOk = x => flag(x.last) === 'ok' || !flag(x.last);
   const rows = [...seriesMap().values()].map(s => {
     const idx = s.pts.map((p, i) => (inP(p) ? i : -1)).filter(i => i >= 0).pop();
     return idx === undefined ? null : { name: s.name, last: s.pts[idx], prev: s.pts[idx - 1] };
-  }).filter(Boolean).sort((a, b) => (flag(a.last) === 'ok' || !flag(a.last)) - (flag(b.last) === 'ok' || !flag(b.last)) || a.name.localeCompare(b.name, 'ru'));
+  }).filter(Boolean).sort((a, b) => isOk(a) - isOk(b) || a.name.localeCompare(b.name, 'ru'));
   const st = studies.filter(inP), cs = conclusions.filter(inP);
-  app.innerHTML = `<h2>Сводка для врача</h2>
-  <div class="toolbar"><select id="per">${Object.entries(periods).map(([k, t]) => `<option value="${k}" ${+k === m ? 'selected' : ''}>За ${t}</option>`).join('')}</select><button class="primary" data-act="print">Печать / сохранить в PDF</button></div>
-  <p class="muted">Составлено ${fmtDate(today())}${from ? `, период с ${fmtDate(from)}` : ''}. Сначала идут показатели вне нормы.</p>
+  app.innerHTML = `${pageHead('Сводка для врача', `Составлено ${fmtDate(today())}${from ? `, период с ${fmtDate(from)}` : ''}. Сначала идут показатели вне нормы.`)}
+  <div class="toolbar"><select id="per" aria-label="Период">${Object.entries(periods).map(([k, t]) => `<option value="${k}" ${+k === m ? 'selected' : ''}>За ${t}</option>`).join('')}</select><button class="primary" data-act="print">Печать или PDF</button></div>
   <div class="card"><h3>Анализы: последние значения</h3>${rows.length ? `<table><thead><tr><th>Показатель</th><th>Значение</th><th>Норма</th><th>Дата</th><th>Было</th><th>Изменение</th></tr></thead><tbody>${rows.map(x => {
     const f = flag(x.last);
-    return `<tr><td>${esc(x.name)}</td><td class="${f}">${esc(x.last.value)} ${esc(x.last.unit)} ${arrow(f)}</td><td class="muted">${esc(rangeText(x.last))}</td><td class="muted">${fmtDate(x.last.date)}</td><td class="muted">${x.prev ? `${esc(x.prev.value)} (${fmtDate(x.prev.date)})` : ''}</td><td class="muted">${x.prev ? deltaText(x.last.value, x.prev.value) : ''}</td></tr>`;
+    return `<tr><td>${esc(x.name)}</td><td class="v ${f}">${esc(x.last.value)} <small>${unitHtml(x.last.unit)}</small></td><td class="muted">${esc(rangeText(x.last))}</td><td class="muted">${fmtDate(x.last.date)}</td><td class="muted">${x.prev ? `${esc(x.prev.value)} (${fmtDate(x.prev.date)})` : ''}</td><td class="muted">${x.prev ? deltaText(x.last.value, x.prev.value) : ''}</td></tr>`;
   }).join('')}</tbody></table>` : '<p class="muted">Нет анализов за период.</p>'}</div>
-  <div class="card"><h3>Исследования</h3>${st.map(s => `<p><b>${fmtDate(s.date)} · ${esc(studyTitle(s))}</b><br><span class="note">${esc(s.conclusion || 'заключение не указано')}</span></p>`).join('') || '<p class="muted">Нет исследований за период.</p>'}</div>
-  <div class="card"><h3>Заключения врачей</h3>${cs.map(c => `<p><b>${fmtDate(c.date)} · ${esc(c.specialty || 'Врач')}</b>${c.diagnosis ? `<br>Диагноз: <span class="note">${esc(c.diagnosis)}</span>` : ''}${c.recs ? `<br>Рекомендации: <span class="note">${esc(c.recs)}</span>` : ''}</p>`).join('') || '<p class="muted">Нет заключений за период.</p>'}</div>`;
+  <div class="card"><h3>Исследования</h3>${st.map(s => `<p><b>${fmtDate(s.date)}, ${esc(studyTitle(s))}</b><br><span class="note">${esc(s.conclusion || 'заключение не указано')}</span></p>`).join('') || '<p class="muted">Нет исследований за период.</p>'}</div>
+  <div class="card"><h3>Заключения врачей</h3>${cs.map(c => `<p><b>${fmtDate(c.date)}, ${esc(c.specialty || 'врач')}</b>${c.diagnosis ? `<br>Диагноз: <span class="note">${esc(c.diagnosis)}</span>` : ''}${c.recs ? `<br>Рекомендации: <span class="note">${esc(c.recs)}</span>` : ''}</p>`).join('') || '<p class="muted">Нет заключений за период.</p>'}</div>`;
   $('#per').addEventListener('change', e => { location.hash = '#/summary/' + e.target.value; });
 }
 
 function viewData() {
-  app.innerHTML = `<h2>Данные</h2>
-  <div class="card"><h3>Где хранятся данные</h3><p class="muted">Записи и сканы лежат только в этом браузере на этом устройстве. Распознавание сканов тоже идёт на устройстве. На GitHub находится лишь код приложения. Если очистить данные сайта или сменить браузер, записи пропадут, поэтому делайте резервные копии.</p></div>
-  <div class="card"><h3>Резервная копия</h3><div class="toolbar">
-    <button class="primary" data-act="export">Скачать копию (JSON)</button>
-    <label class="btn">Восстановить из файла<input type="file" id="imp" accept="application/json" hidden></label></div>
-    <p class="muted">Файл копии содержит все записи и сканы. Не публикуйте его и не загружайте в репозиторий. Через копию можно перенести данные на другое устройство.</p></div>
-  <div class="card"><h3>Опасная зона</h3><button class="danger" data-act="wipe">Удалить все данные</button></div>`;
+  const auto = store.get('auto') !== 'off', lastFile = +store.get('lastFile') || 0, theme = store.get('theme') || 'light';
+  const count = b => RECORDS.reduce((n, s) => n + (b[s] || []).length, 0);
+  app.innerHTML = `${pageHead('Копии и настройки')}
+  <div class="card"><h3>Копия в файл</h3><p class="muted">Файл содержит все записи и сканы. Храните его в «Файлах» или в облаке: он спасёт данные, если браузер их сотрёт, и переносит их на другое устройство. ${lastFile ? `Последняя копия: ${fmtStamp(lastFile)}.` : 'Копии в файл ещё не было.'}</p>
+    <div class="toolbar"><button class="primary" data-act="export">Сохранить копию</button><label class="btn">Восстановить из файла<input type="file" id="imp" accept="application/json,.json" hidden></label></div></div>
+  <div class="card"><h3>Автокопии раз в неделю</h3>
+    <label class="check"><input type="checkbox" id="auto" ${auto ? 'checked' : ''}> Делать точку восстановления каждую неделю и напоминать о копии в файл</label>
+    <p class="muted">Точки восстановления хранятся внутри приложения и помогают откатить случайные правки и удаления. Хранятся пять последних.</p>
+    ${backups.length ? `<ul class="plain">${backups.map(b => `<li><span>${fmtStamp(b.at)}</span><span class="muted">${b.auto ? 'авто' : b.note || 'вручную'}, записей: ${count(b)}</span><button class="sm" data-act="restore" data-id="${b.id}">Вернуть</button></li>`).join('')}</ul>` : '<p class="muted">Точек восстановления пока нет.</p>'}
+    <button data-act="snapshot">Создать точку сейчас</button></div>
+  <div class="card"><h3>Оформление</h3><div class="chips">${[['light', 'Светлое'], ['dark', 'Тёмное'], ['auto', 'Как в системе']].map(([k, t]) => `<button class="sm ${theme === k ? 'primary' : ''}" data-act="theme" data-id="${k}">${t}</button>`).join('')}</div></div>
+  <div class="card"><h3>Где хранятся данные</h3><p class="muted">Записи и сканы лежат только в этом браузере на этом устройстве, распознавание тоже идёт здесь. На GitHub находится лишь код приложения. Обновление приложения записи не затрагивает.</p>
+    <button class="danger" data-act="wipe">Удалить все данные</button></div>`;
   $('#imp').addEventListener('change', e => e.target.files[0] && importData(e.target.files[0]));
+  $('#auto').addEventListener('change', e => store.set('auto', e.target.checked ? 'on' : 'off'));
 }
 
 // ---------- формы ----------
@@ -384,7 +470,7 @@ function openDialog(html, onSubmit, preview = '') {
   const form = $('form', dlg);
   form.addEventListener('submit', async e => {
     e.preventDefault();
-    try { await onSubmit(form); dlg.close(); await load(); render(); } catch (err) { alert('Не удалось сохранить: ' + err.message); }
+    try { await onSubmit(form); await gc(); dlg.close(); await load(); render(); } catch (err) { alert('Не удалось сохранить: ' + err.message); }
   });
   $('[data-close]', dlg).addEventListener('click', () => dlg.close());
   dlg.showModal();
@@ -394,22 +480,21 @@ function openDialog(html, onSubmit, preview = '') {
 async function draftPreview(d) {
   if (!d) return '';
   const f = await DB.get('files', d.fileId);
-  let media = `<a class="file" data-act="open-file" data-id="${d.fileId}">📎 Открыть ${esc(d.name)}</a>`;
+  let media = `<a class="file" data-act="open-file" data-id="${d.fileId}">${ic('clip')}Открыть ${esc(d.name)}</a>`;
   if (f && (f.type || '').startsWith('image/')) { const url = URL.createObjectURL(f.blob); dlgUrls.push(url); media = `<a href="${url}" target="_blank" title="Открыть в полном размере"><img src="${url}" alt="Скан"></a>`; }
-  return `<aside class="scan"><p class="warn">Сверьте данные со сканом: распознавание может ошибаться.</p>${media}
+  return `<aside class="scan"><p class="hint">Сверьте данные со сканом: распознавание может ошибаться.</p>${media}
     <details><summary>Распознанный текст</summary><pre>${esc(d.text || 'Текст не распознан.')}</pre></details></aside>`;
 }
 const draftFiles = d => (d ? [{ id: d.fileId, name: d.name }] : []);
 const actionsRow = '<div class="actions"><button type="button" data-close>Отмена</button><button class="primary">Сохранить</button></div>';
 const dateField = (v, label = 'Дата') => `<label>${label}<input type="date" name="date" required max="${today()}" value="${esc(v)}"></label>`;
-const nextField = v => `<label>Контроль: когда повторить или прийти снова (необязательно)<input type="date" name="nextDate" value="${esc(v)}"></label>`;
-const filesBlock = files => `${(files || []).length ? `<div class="muted">Файлы (снимите галочку, чтобы удалить):</div>${files.map(f => `<label class="check"><input type="checkbox" name="keep" value="${f.id}" checked> ${esc(f.name)}</label>`).join('')}` : ''}
-  <label>Прикрепить файлы (скан, PDF, фото)<input type="file" name="newfiles" multiple accept="image/*,application/pdf"></label>`;
+const nextField = v => `<label>Контроль: когда повторить или прийти снова<input type="date" name="nextDate" value="${esc(v)}"></label>`;
+const filesBlock = files => `${(files || []).length ? `<div class="muted">Файлы (снимите галочку, чтобы убрать)</div>${files.map(f => `<label class="check"><input type="checkbox" name="keep" value="${f.id}" checked> ${esc(f.name)}</label>`).join('')}` : ''}
+  <label>Прикрепить файлы<input type="file" name="newfiles" multiple accept="image/*,application/pdf"></label>`;
 
 async function saveFiles(form, old) {
   const keepIds = new Set([...form.querySelectorAll('[name=keep]:checked')].map(x => x.value));
   const kept = (old || []).filter(f => keepIds.has(f.id));
-  for (const f of (old || []).filter(f => !keepIds.has(f.id))) await DB.del('files', f.id);
   for (const file of form.elements.newfiles.files) {
     const id = uid();
     await DB.put('files', { id, name: file.name, type: file.type, blob: file });
@@ -420,21 +505,21 @@ async function saveFiles(form, old) {
 const readRows = (form, sel, fields) => [...form.querySelectorAll(sel)].map(r => Object.fromEntries(fields.map(n => [n, r.querySelector(`[name=${n}]`).value.trim()])));
 
 function resultRow(r = {}) {
-  const w = n => ((r.warn || []).includes(n) ? ' class="sus" title="Проверьте по скану"' : '');
+  const w = n => ((r.warn || []).includes(n) ? ' class="sus" title="Проверьте по скану"' : r.fromCatalog && (n === 'min' || n === 'max') ? ' class="cat" title="Норма из справочника"' : '');
   return `<div class="row r5">
-    <input name="name" list="catalog" placeholder="Показатель" value="${esc(r.name)}">
-    <input name="value" placeholder="Значение" value="${esc(r.value)}" inputmode="decimal"${w('value')}>
-    <input name="unit" placeholder="Ед." value="${esc(r.unit)}"${w('unit')}>
-    <input name="min" placeholder="Мин" value="${esc(r.min)}" inputmode="decimal"${w('min')}>
-    <input name="max" placeholder="Макс" value="${esc(r.max)}" inputmode="decimal"${w('max')}>
-    <button type="button" class="sm" data-rm title="Убрать строку">×</button></div>`;
+    <input name="name" list="catalog" placeholder="Показатель" aria-label="Показатель" value="${esc(r.name)}">
+    <input name="value" placeholder="Значение" aria-label="Значение" value="${esc(r.value)}" inputmode="decimal"${w('value')}>
+    <input name="unit" placeholder="Ед." aria-label="Единица" value="${esc(r.unit)}"${w('unit')}>
+    <input name="min" placeholder="Мин" aria-label="Норма от" value="${esc(r.min)}" inputmode="decimal"${w('min')}>
+    <input name="max" placeholder="Макс" aria-label="Норма до" value="${esc(r.max)}" inputmode="decimal"${w('max')}>
+    <button type="button" class="round sm" data-rm aria-label="Убрать строку" title="Убрать строку">×</button></div>`;
 }
 function measureRow(m = {}) {
   return `<div class="row r3">
-    <input name="name" list="measures" placeholder="Что измерено (напр. объём правой доли)" value="${esc(m.name)}">
-    <input name="value" placeholder="Значение" value="${esc(m.value)}" inputmode="decimal">
-    <input name="unit" placeholder="Ед." value="${esc(m.unit)}">
-    <button type="button" class="sm" data-rm title="Убрать строку">×</button></div>`;
+    <input name="name" list="measures" placeholder="Что измерено" aria-label="Что измерено" value="${esc(m.name)}">
+    <input name="value" placeholder="Значение" aria-label="Значение" value="${esc(m.value)}" inputmode="decimal">
+    <input name="unit" placeholder="Ед." aria-label="Единица" value="${esc(m.unit)}">
+    <button type="button" class="round sm" data-rm aria-label="Убрать строку" title="Убрать строку">×</button></div>`;
 }
 function prefill(name) {
   const last = seriesMap().get(key(name));
@@ -444,8 +529,9 @@ function prefill(name) {
 }
 function rowEvents(form, rowsEl, makeRow) {
   form.addEventListener('click', e => {
-    if (e.target.matches('[data-rm]')) e.target.closest('.row').remove();
-    if (e.target.matches('[data-addrow]')) rowsEl.insertAdjacentHTML('beforeend', makeRow());
+    const rm = e.target.closest('[data-rm]');
+    if (rm) rm.closest('.row').remove();
+    if (e.target.closest('[data-addrow]')) rowsEl.insertAdjacentHTML('beforeend', makeRow());
   });
 }
 
@@ -453,13 +539,14 @@ async function analysisForm(a, draft) {
   const p = draft && draft.parsed;
   a = a || { date: draft ? (p && p.date) || '' : today(), lab: (p && p.lab) || '', note: '', results: (p && p.results) || [], files: draftFiles(draft) };
   const form = openDialog(`<h2>${a.id ? 'Анализ' : 'Новый анализ'}</h2>
-    <div class="two">${dateField(a.date, 'Дата сдачи')}<label>Лаборатория / клиника<input name="lab" value="${esc(a.lab)}"></label></div>
-    <div class="muted">Быстро добавить набор:</div>
+    <div class="two">${dateField(a.date, 'Дата сдачи')}<label>Лаборатория или клиника<input name="lab" value="${esc(a.lab)}"></label></div>
+    <div class="muted">Добавить набор</div>
     <div class="chips">${Object.keys(PANELS).map(n => `<button type="button" class="sm" data-panel="${esc(n)}">${esc(n)}</button>`).join('')}</div>
-    ${a.results.some(r => r.warn) ? '<p class="warn sus-note">Жёлтым выделены значения, которые выглядят подозрительно (например, потерялась запятая). Проверьте их по скану.</p>' : ''}
+    ${a.results.some(r => r.warn) ? '<p class="hint warn">Жёлтым выделено то, что выглядит подозрительно (например, потерялась запятая). Проверьте по скану.</p>' : ''}
+    ${a.results.some(r => r.fromCatalog) ? '<p class="hint">Голубым выделена норма из справочника: в документе её нет. Поправьте, если ваша лаборатория даёт другую.</p>' : ''}
     <div class="row r5 head"><span>Показатель</span><span>Значение</span><span>Ед.</span><span>Мин</span><span>Макс</span><span></span></div>
     <div id="rows">${(a.results.length ? a.results : [{}]).map(resultRow).join('')}</div>
-    <button type="button" class="sm" data-addrow>+ строка</button>
+    <button type="button" class="sm" data-addrow>${ic('plus')}Строка</button>
     <label class="mt">Заметка<textarea name="note" rows="2">${esc(a.note)}</textarea></label>
     ${nextField(a.nextDate)}${filesBlock(a.files)}${actionsRow}`,
   async f => {
@@ -499,13 +586,13 @@ async function studyForm(s, draft, seriesKey) {
   const mnames = [...new Set(studies.flatMap(x => (x.measures || []).map(m => m.name)).filter(Boolean))];
   const form = openDialog(`<h2>${s.id ? 'Исследование' : 'Новое исследование'}</h2>
     <div class="two">${dateField(s.date, 'Дата исследования')}<label>Вид<select name="type">${STUDY_TYPES.map(([t]) => `<option ${t === s.type ? 'selected' : ''}>${t}</option>`).join('')}</select></label></div>
-    <label>Что исследовали (по этому полю записи собираются в динамику)<input name="area" list="areas" value="${esc(s.area)}" placeholder="Напр. Щитовидная железа"></label>
+    <label>Что исследовали (по этому полю записи собираются в динамику)<input name="area" list="areas" value="${esc(s.area)}" placeholder="Щитовидная железа"></label>
     <datalist id="areas">${areas.map(x => `<option value="${esc(x)}">`).join('')}</datalist><datalist id="measures">${mnames.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
     <div class="two"><label>Клиника<input name="clinic" value="${esc(s.clinic)}"></label><label>Врач<input name="doctor" value="${esc(s.doctor)}"></label></div>
     <label>Заключение<textarea name="conclusion" rows="4">${esc(s.conclusion)}</textarea></label>
-    <div class="muted">Измерения для графиков (размеры, объёмы и т. п.):</div>
+    <div class="muted">Измерения для графиков: размеры, объёмы</div>
     <div id="rows">${(s.measures.length ? s.measures : [{}]).map(measureRow).join('')}</div>
-    <button type="button" class="sm" data-addrow>+ измерение</button>
+    <button type="button" class="sm" data-addrow>${ic('plus')}Измерение</button>
     <label class="mt">Рекомендации<textarea name="recs" rows="2">${esc(s.recs)}</textarea></label>
     <label>Описание (протокол)<textarea name="description" rows="4">${esc(s.description)}</textarea></label>
     ${nextField(s.nextDate)}${filesBlock(s.files)}${actionsRow}`,
@@ -524,7 +611,7 @@ async function conclusionForm(c, draft) {
   c = c || { date: draft ? (p && p.date) || '' : today(), specialty: (p && p.specialty) || '', doctor: (p && p.doctor) || '', clinic: '', diagnosis: (p && p.diagnosis) || '', text: (p && p.conclusion) || (draft && draft.text) || '', recs: (p && p.recs) || '', files: draftFiles(draft) };
   const specs = [...new Set([...conclusions.map(x => x.specialty).filter(Boolean), ...SPECIALTIES.map(x => x[0])])];
   openDialog(`<h2>${c.id ? 'Заключение врача' : 'Новое заключение врача'}</h2>
-    <div class="two">${dateField(c.date, 'Дата приёма')}<label>Специальность<input name="specialty" list="specs" value="${esc(c.specialty)}" placeholder="Напр. Эндокринолог"></label></div>
+    <div class="two">${dateField(c.date, 'Дата приёма')}<label>Специальность<input name="specialty" list="specs" value="${esc(c.specialty)}" placeholder="Эндокринолог"></label></div>
     <datalist id="specs">${specs.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
     <div class="two"><label>Врач<input name="doctor" value="${esc(c.doctor)}"></label><label>Клиника<input name="clinic" value="${esc(c.clinic)}"></label></div>
     <label>Диагноз<textarea name="diagnosis" rows="2">${esc(c.diagnosis)}</textarea></label>
@@ -541,7 +628,7 @@ async function conclusionForm(c, draft) {
 
 // ---------- сканы: загрузка и распознавание ----------
 const route = () => location.hash.replace(/^#\/?/, '').split('/')[0];
-function refreshIfVisible() { if (['', 'scans'].includes(route())) render(); }
+function refreshIfVisible() { if (['', 'scans', 'more'].includes(route())) render(); else updateBadge(); }
 
 async function addScans(fileList) {
   const files = [...fileList].filter(f => f.type.startsWith('image/') || f.type === 'application/pdf');
@@ -568,8 +655,8 @@ async function processInbox() {
       await DB.put('inbox', d); await load(); refreshIfVisible();
       try {
         const f = await DB.get('files', d.fileId);
-        const text = await OCR.recognize(f.blob, f.type, v => { const el = document.getElementById('prog-' + d.id); if (el) el.value = v; });
-        Object.assign(d, analyzeText(text, today()), { text, status: 'ready' });
+        const res = await OCR.recognize(f.blob, f.type, v => { const el = document.getElementById('prog-' + d.id); if (el) el.value = v; });
+        Object.assign(d, analyzeText(res.text, today(), res.lines), { text: res.text, status: 'ready' });
       } catch (e) {
         Object.assign(d, { status: 'error', error: String((e && e.message) || e), text: '', kind: '', parsed: null });
       }
@@ -579,55 +666,80 @@ async function processInbox() {
   } finally { processing = false; }
 }
 
-// ---------- резервная копия ----------
+// ---------- резервные копии ----------
+async function makeSnapshot(auto, note = '') {
+  await DB.put('backups', { id: uid(), at: Date.now(), auto, note, analyses: await DB.all('analyses'), studies: await DB.all('studies'), conclusions: await DB.all('conclusions') });
+  const all = (await DB.all('backups')).sort((a, b) => b.at - a.at);
+  for (const old of all.slice(5)) await DB.del('backups', old.id);
+  await gc();
+}
+async function weeklySnapshot() {
+  if (store.get('auto') === 'off' || !hasData()) return;
+  const lastAuto = backups.find(b => b.auto);
+  if (!lastAuto || Date.now() - lastAuto.at > WEEK) { await makeSnapshot(true); await load(); }
+}
+async function restoreSnapshot(id) {
+  const b = await DB.get('backups', id);
+  if (!b || !confirm(`Вернуть записи к состоянию на ${fmtStamp(b.at)}? Текущее состояние сохранится как отдельная точка.`)) return;
+  await makeSnapshot(false, 'перед возвратом');
+  for (const s of RECORDS) { await DB.clear(s); for (const x of b[s] || []) await DB.put(s, x); }
+  await gc(); await load(); render();
+}
 const blobToDataURL = b => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); });
 async function exportData() {
   const files = [];
   for (const f of await DB.all('files')) files.push({ id: f.id, name: f.name, type: f.type, data: await blobToDataURL(f.blob) });
-  const payload = { app: 'med-tracker', version: 2, exportedAt: new Date().toISOString(), analyses, studies, conclusions, inbox, files };
-  downloadBlob(new Blob([JSON.stringify(payload)], { type: 'application/json' }), `medtracker-backup-${today()}.json`);
+  const payload = { app: 'med-tracker', version: 3, exportedAt: new Date().toISOString(), analyses, studies, conclusions, inbox, files };
+  const name = `medtracker-backup-${today()}.json`;
+  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+  let saved = true;
+  const file = typeof File === 'function' ? new File([blob], name, { type: 'application/json' }) : null;
+  // на телефоне открываем «Поделиться», чтобы сохранить в «Файлы» или облако
+  if (file && /iPhone|iPad|Android/i.test(navigator.userAgent) && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); } catch (e) { if (e.name === 'AbortError') saved = false; else downloadBlob(blob, name); }
+  } else downloadBlob(blob, name);
+  if (saved) { store.set('lastFile', Date.now()); render(); }
 }
 async function importData(file) {
   try {
     const d = JSON.parse(await file.text());
     if (d.app !== 'med-tracker') throw new Error('это не файл копии приложения');
+    if (hasData()) await makeSnapshot(false, 'перед импортом');
     for (const f of d.files || []) await DB.put('files', { id: f.id, name: f.name, type: f.type, blob: await (await fetch(f.data)).blob() });
-    for (const s of ['analyses', 'studies', 'conclusions', 'inbox']) for (const x of d[s] || []) await DB.put(s, x);
+    for (const s of [...RECORDS, 'inbox']) for (const x of d[s] || []) await DB.put(s, x);
     await migrate(); await load(); render();
     alert('Данные восстановлены.');
   } catch (e) { alert('Не удалось импортировать: ' + e.message); }
 }
 
 // ---------- действия ----------
-async function removeEntity(store, id) {
-  const item = await DB.get(store, id);
-  for (const f of (item && item.files) || []) await DB.del('files', f.id);
-  await DB.del(store, id);
-  await load(); render();
+async function removeEntity(s, id) {
+  await DB.del(s, id);
+  await gc(); await load(); render();
 }
+function applyTheme(t) { document.documentElement.dataset.theme = t; }
 const draftOf = id => inbox.find(d => d.id === id);
 const actions = {
   'add-analysis': () => analysisForm(),
   'edit-analysis': id => analysisForm(analyses.find(a => a.id === id)),
-  'del-analysis': id => confirm('Удалить этот анализ вместе с его файлами?') && removeEntity('analyses', id),
+  'del-analysis': id => confirm('Удалить этот анализ?') && removeEntity('analyses', id),
   'add-study': k => studyForm(null, null, k),
   'edit-study': id => studyForm(studies.find(s => s.id === id)),
-  'del-study': id => confirm('Удалить это исследование вместе с его файлами?') && removeEntity('studies', id),
+  'del-study': id => confirm('Удалить это исследование?') && removeEntity('studies', id),
   'add-conclusion': () => conclusionForm(),
   'edit-conclusion': id => conclusionForm(conclusions.find(c => c.id === id)),
-  'del-conclusion': id => confirm('Удалить это заключение вместе с его файлами?') && removeEntity('conclusions', id),
+  'del-conclusion': id => confirm('Удалить это заключение?') && removeEntity('conclusions', id),
   'draft-analysis': id => analysisForm(null, draftOf(id)),
   'draft-study': id => studyForm(null, draftOf(id)),
   'draft-visit': id => conclusionForm(null, draftOf(id)),
   'del-draft': async id => {
-    const d = draftOf(id);
-    if (!d || !confirm('Удалить этот скан?')) return;
-    await DB.del('files', d.fileId); await DB.del('inbox', id); await load(); render();
+    if (!draftOf(id) || !confirm('Удалить этот скан?')) return;
+    await DB.del('inbox', id); await gc(); await load(); render();
   },
   'done-next': async v => {
-    const [store, id] = v.split(':');
-    const item = await DB.get(store, id);
-    if (item) { item.nextDate = ''; await DB.put(store, item); await load(); render(); }
+    const [s, id] = v.split(':');
+    const item = await DB.get(s, id);
+    if (item) { item.nextDate = ''; await DB.put(s, item); await load(); render(); }
   },
   'open-file': async id => {
     const f = await DB.get('files', id);
@@ -636,8 +748,12 @@ const actions = {
   ics: exportIcs,
   print: () => window.print(),
   export: exportData,
+  snooze: () => { store.set('snooze', Date.now() + 864e5); render(); },
+  snapshot: async () => { await makeSnapshot(false); await load(); render(); },
+  restore: restoreSnapshot,
+  theme: t => { store.set('theme', t); applyTheme(t); render(); },
   wipe: async () => {
-    if (!confirm('Удалить ВСЕ данные и сканы без возможности восстановления? Сначала сделайте копию.')) return;
+    if (!confirm('Удалить ВСЕ данные, сканы и точки восстановления? Вернуть их можно будет только из файла копии.')) return;
     for (const s of STORES) await DB.clear(s);
     await load(); render();
   },
@@ -646,20 +762,22 @@ document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if (el && actions[el.dataset.act]) actions[el.dataset.act](el.dataset.id);
 });
-document.addEventListener('input', e => { if (e.target.classList.contains('sus')) e.target.classList.remove('sus'); });
+document.addEventListener('input', e => { if (e.target.classList.contains('sus') || e.target.classList.contains('cat')) e.target.classList.remove('sus', 'cat'); });
 document.addEventListener('change', e => {
   if (e.target.matches('.scan-input') && e.target.files.length) { addScans(e.target.files); e.target.value = ''; }
 });
 
 // ---------- роутер ----------
+function updateBadge() {
+  document.querySelectorAll('.scan-count').forEach(b => { b.textContent = inbox.length || ''; b.hidden = !inbox.length; });
+}
 function render() {
   const [r = '', param = ''] = location.hash.replace(/^#\/?/, '').split('/');
   const p = decodeURIComponent(param);
-  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.getAttribute('href') === '#/' + r));
-  const views = { scans: viewScans, analyses: viewAnalyses, indicators: () => viewIndicators(p), studies: () => viewStudies(p), conclusions: viewConclusions, timeline: () => viewTimeline(p), summary: () => viewSummary(p), data: viewData };
+  document.querySelectorAll('[data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === r));
+  const views = { scans: viewScans, analyses: viewAnalyses, indicators: () => viewIndicators(p), studies: () => viewStudies(p), conclusions: viewConclusions, timeline: () => viewTimeline(p), summary: () => viewSummary(p), data: viewData, more: viewMore };
   (views[r] || viewHome)();
-  const badge = $('#scan-count');
-  if (badge) badge.textContent = inbox.length ? ` ${inbox.length}` : '';
+  updateBadge();
 }
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
 
@@ -671,6 +789,7 @@ window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); }
     await migrate();
     for (const d of await DB.all('inbox')) if (d.status === 'processing') { d.status = 'queued'; await DB.put('inbox', d); }
     await load();
+    await weeklySnapshot();
     render();
     processInbox();
   } catch (e) {

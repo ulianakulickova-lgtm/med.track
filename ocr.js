@@ -45,23 +45,33 @@ const OCR = (() => {
     return c;
   }
 
-  async function ocrCanvas(canvas, progress) {
+  // Результат распознавания: текст и строки со словами и их координатами
+  // (координаты нужны, чтобы разложить таблицу анализа по колонкам).
+  async function ocrCanvas(canvas, progress, yOffset = 0) {
     const w = await getWorker();
     onProgress = progress;
-    try { return (await w.recognize(canvas)).data.text || ''; } finally { onProgress = null; }
+    try {
+      const { data } = await w.recognize(canvas);
+      const lines = (data.lines || []).map(l => ({
+        y: yOffset + l.bbox.y1, h: l.bbox.y1 - l.bbox.y0,
+        cells: (l.words || []).filter(x => x.text && x.text.trim()).map(x => ({ x0: x.bbox.x0, x1: x.bbox.x1, s: x.text.trim() })),
+      })).filter(l => l.cells.length);
+      return { text: data.text || '', lines };
+    } finally { onProgress = null; }
   }
 
   // текстовый слой PDF: собираем строки по вертикальной координате
-  function linesFromItems(items) {
+  function linesFromItems(items, pageH, yOffset) {
     const rows = [];
     for (const it of items) {
       if (!it.str || !it.str.trim()) continue;
-      const y = it.transform[5], x = it.transform[4];
-      let row = rows.find(r => Math.abs(r.y - y) < 3);
-      if (!row) rows.push(row = { y, parts: [] });
-      row.parts.push({ x, s: it.str });
+      const x = it.transform[4], y = pageH - it.transform[5], h = it.height || Math.abs(it.transform[3]) || 10;
+      let row = rows.find(r => Math.abs(r.y0 - y) < 2.5);
+      if (!row) rows.push(row = { y0: y, y: yOffset + y, h, cells: [] });
+      row.cells.push({ x0: x, x1: x + (it.width || it.str.length * h * 0.5), s: it.str.trim() });
     }
-    return rows.sort((a, b) => b.y - a.y).map(r => r.parts.sort((a, b) => a.x - b.x).map(p => p.s).join(' ')).join('\n');
+    rows.sort((a, b) => a.y - b.y).forEach(r => r.cells.sort((a, b) => a.x0 - b.x0));
+    return rows;
   }
 
   async function pdfToText(blob, progress) {
@@ -70,22 +80,25 @@ const OCR = (() => {
     lib.GlobalWorkerOptions.workerSrc = abs('vendor/pdfjs/pdf.worker.min.js');
     const pdf = await lib.getDocument({ data: await blob.arrayBuffer() }).promise;
     const n = Math.min(pdf.numPages, 15);
-    const out = [];
+    const out = { text: '', lines: [] };
     for (let i = 1; i <= n; i++) {
       const page = await pdf.getPage(i);
-      let text = linesFromItems((await page.getTextContent()).items);
-      if ((text.match(/[A-Za-zА-Яа-я]/g) || []).length < 40) {
+      const yOffset = (i - 1) * 100000;
+      const rows = linesFromItems((await page.getTextContent()).items, page.getViewport({ scale: 1 }).height, yOffset);
+      let res = { text: rows.map(r => r.cells.map(c => c.s).join(' ')).join('\n'), lines: rows };
+      if ((res.text.match(/[A-Za-zА-Яа-я]/g) || []).length < 40) {
         // скан внутри PDF: рисуем страницу и распознаём
         const vp = page.getViewport({ scale: 2 });
         const c = document.createElement('canvas');
         c.width = vp.width; c.height = vp.height;
         await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-        text = await ocrCanvas(c, p => progress && progress((i - 1 + p) / n));
+        res = await ocrCanvas(c, v => progress && progress((i - 1 + v) / n), yOffset);
       }
-      out.push(text);
+      out.text += (out.text ? '\n' : '') + res.text;
+      out.lines.push(...res.lines);
       if (progress) progress(i / n);
     }
-    return out.join('\n');
+    return out;
   }
 
   return {
