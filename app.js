@@ -159,13 +159,30 @@ function studySeries() {
 // дополняем их разбором протокола «на лету», ничего не перезаписывая.
 function studyParams(s) {
   const own = s.measures || [];
-  if (s.pv || !s.description) return own;
-  const have = new Set(own.map(m => key(m.name)));
-  return [...own, ...parseFindings(s.description.split(/\n\s*заключение\s*[:.\-–]/i)[0]).filter(m => !have.has(key(m.name)))];
+  if (s.pv === PARSER_VERSION || !s.description) return own;
+  // запись сохранена старой версией: разбираем протокол заново (по органам), значения, введённые вручную, оставляем
+  const parsed = parseFindings(s.description);
+  if (!parsed.length) return own;
+  const used = new Set();
+  own.forEach(o => {
+    const hits = parsed.filter(m => key(m.name) === key(o.name) || key(m.name).endsWith(': ' + key(o.name)));
+    if (hits.length) used.add(o);
+    // число, исправленное вручную, сохраняем — но только когда понятно, к какому органу оно относится
+    if (hits.length === 1 && num(o.value) !== null && !/[×x]/.test(hits[0].value)) { hits[0].value = o.value; hits[0].unit = o.unit || hits[0].unit; }
+  });
+  const concl = key(s.conclusion);
+  return [...parsed, ...own.filter(o => !used.has(o) && !concl.includes(key(o.name)))];
+}
+// «Заключение» старых записей могло захватить «Рекомендовано: …» и «ПОДПИСИ» — разделяем при показе
+function studyText(s) {
+  let c = String(s.conclusion || '').replace(/\n?\s*подписи?\s*[\s\S]*$/i, ''), recs = s.recs || '';
+  const m = c.match(/\n?\s*рекомендовано\s*:?\s*/i);
+  if (m) { if (!recs) recs = c.slice(m.index + m[0].length); c = c.slice(0, m.index); }
+  const fix = x => x.replace(/\s+([.,;:])/g, '$1').trim();
+  return { conclusion: fix(c), recs: fix(recs) };
 }
 const isClear = v => /^(не\s+(выявлен|обнаружен|увеличен|расширен|изменен|утолщен)|без\s+(особенностей|патологии)|в\s+(пределах\s+)?норм)/i.test(String(v));
-function paramsHtml(params) {
-  if (!params.length) return '';
+function groupParams(params) {
   const groups = new Map();
   params.forEach(m => {
     const i = m.name.indexOf(': ');
@@ -173,8 +190,14 @@ function paramsHtml(params) {
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push({ label: label[0].toUpperCase() + label.slice(1), m });
   });
+  return groups;
+}
+// каждый орган — отдельный блок с заголовком и плашками параметров
+function paramsHtml(params) {
+  if (!params.length) return '';
+  const groups = groupParams(params), named = [...groups.keys()].some(Boolean);
   const tile = ({ label, m }) => `<div class="param ${num(m.value) === null || /[×x]/.test(m.value) ? (isClear(m.value) ? 'clear' : 'txt') : 'numv'}"><span>${esc(label)}</span><b>${esc(m.value)}${m.unit ? ` <small>${esc(m.unit)}</small>` : ''}</b></div>`;
-  return [...groups.entries()].map(([g, items]) => `${g ? `<h4 class="pg">${esc(g)}</h4>` : ''}<div class="params">${items.map(tile).join('')}</div>`).join('');
+  return [...groups.entries()].map(([g, items]) => `<section class="organ"><h4>${esc(g || (named ? 'Общее' : 'Параметры'))}<span class="muted">${items.length}</span></h4><div class="params">${items.map(tile).join('')}</div></section>`).join('');
 }
 // рекомендации и подобный текст: список вместо сплошной строки
 function listHtml(text) {
@@ -261,7 +284,7 @@ function analysisCard(a) {
 }
 function studyCard(s) {
   return `<article class="card">${recHead('scan', 'lilac', `<a href="#/studies/${enc(studyKey(s))}">${esc(studyTitle(s))}</a>`, `${fmtDate(s.date)}${s.clinic ? ', ' + esc(s.clinic) : ''}${s.doctor ? ', ' + esc(s.doctor) : ''} ${nextBadge(s)}`, cardBtns('study', s.id))}
-    ${conclHtml(s.conclusion)}${paramsHtml(studyParams(s))}${s.recs ? `<h4>Рекомендации</h4>${listHtml(s.recs)}` : ''}${medChips(s.id)}
+    ${conclHtml(studyText(s).conclusion)}${paramsHtml(studyParams(s))}${studyText(s).recs ? `<h4>Рекомендации</h4>${listHtml(studyText(s).recs)}` : ''}${medChips(s.id)}
     ${s.description ? `<details><summary>Полный текст протокола</summary><p class="note">${esc(s.description)}</p></details>` : ''}${fileLinks(s.files)}</article>`;
 }
 const visitType = c => `${c.kind || 'Консультация'}${c.specialty ? ', ' + c.specialty.toLowerCase() : ''}`;
@@ -272,7 +295,7 @@ function conclusionCard(c) {
 // заключение из исследования — для общего раздела «Заключения»
 function studyConclCard(s) {
   return `<article class="card">${recHead('scan', 'lilac', esc(studyTitle(s)), `<span class="pill plain">${fmtDate(s.date)}</span> ${esc([s.doctor, s.clinic].filter(Boolean).join(', '))}`, `<div class="btns"><a class="round sm" href="#/studies/${enc(studyKey(s))}" aria-label="Открыть исследование" title="Открыть исследование">${ic('right')}</a></div>`)}
-    ${conclHtml(s.conclusion)}${s.recs ? `<h4>Рекомендации</h4>${listHtml(s.recs)}` : ''}${fileLinks(s.files)}</article>`;
+    ${conclHtml(studyText(s).conclusion)}${studyText(s).recs ? `<h4>Рекомендации</h4>${listHtml(studyText(s).recs)}` : ''}${fileLinks(s.files)}</article>`;
 }
 
 // ---------- контроль (что и когда повторить) ----------
@@ -476,7 +499,7 @@ function viewStudies(param) {
     const groups = [...sm.values()].sort((a, b) => byDateDesc(a.items[a.items.length - 1], b.items[b.items.length - 1]));
     listView('Исследования', groups, g => {
       const last = g.items[g.items.length - 1];
-      return `<a class="card link" href="#/studies/${enc(g.key)}">${recHead('scan', 'lilac', esc(g.title), `Последнее ${fmtDate(last.date)}, всего ${g.items.length}`, ic('right'))}${last.conclusion ? `<p class="note clip">${esc(last.conclusion)}</p>` : ''}</a>`;
+      return `<a class="card link" href="#/studies/${enc(g.key)}">${recHead('scan', 'lilac', esc(g.title), `Последнее ${fmtDate(last.date)}, всего ${g.items.length}`, ic('right'))}${last.conclusion ? `<p class="note clip">${esc(studyText(last).conclusion)}</p>` : ''}</a>`;
     }, `<button class="primary" data-act="add-study">${ic('plus')}Исследование</button>`,
     g => [g.title, ...g.items.map(s => [s.conclusion, s.clinic, s.doctor, fmtDate(s.date)].join(' '))].join(' '), 'Исследований пока нет. УЗИ, МРТ, рентген и другие собираются здесь по видам.');
     return;
@@ -491,12 +514,12 @@ function viewStudies(param) {
     return pts.filter(p => num(p.value) !== null).length >= 2 ? `<div class="card"><h3>${esc(name)}${pts[0].unit ? ', ' + esc(pts[0].unit) : ''}</h3>${chart(pts)}</div>` : '';
   }).join('');
   const matrix = items.length > 1 && names.size ? `<div class="card"><h3>Динамика параметров</h3><p class="muted">Цветом отмечено то, что изменилось по сравнению с предыдущим исследованием.</p>
-    <table class="matrix"><thead><tr><th>Параметр</th>${items.map(s => `<th>${fmtDate(s.date)}</th>`).join('')}</tr></thead><tbody>${[...names.entries()].map(([k, name]) => `<tr><td>${esc(name)}</td>${items.map((s, i) => {
+    <table class="matrix"><thead><tr><th>Параметр</th>${items.map(s => `<th>${fmtDate(s.date)}</th>`).join('')}</tr></thead><tbody>${[...groupParams([...names.values()].map(n => ({ name: n }))).entries()].map(([g, list]) => `${g ? `<tr class="org"><td colspan="${items.length + 1}">${esc(g)}</td></tr>` : ''}${list.map(({ label, m: nm }) => { const k = key(nm.name); return `<tr><td>${esc(label)}</td>${items.map((s, i) => {
       const m = cell(i, k), prev = i ? cell(i - 1, k) : null;
       const chg = m && prev && key(m.value) !== key(prev.value);
       return `<td class="${chg ? 'chg' : ''}">${m ? `<b>${esc(m.value)}</b> <small>${esc(m.unit)}</small>${chg && num(m.value) !== null && num(prev.value) !== null && !/[×x]/.test(m.value) ? `<div class="muted">${deltaText(m.value, prev.value)}</div>` : ''}` : '<span class="muted">нет</span>'}</td>`;
-    }).join('')}</tr>`).join('')}
-    <tr><td>Заключение</td>${items.map(s => `<td>${esc(s.conclusion || '')}</td>`).join('')}</tr></tbody></table></div>` : '';
+    }).join('')}</tr>`; }).join('')}`).join('')}
+    <tr class="org"><td colspan="${items.length + 1}">Заключение</td></tr><tr><td></td>${items.map(s => `<td>${esc(studyText(s).conclusion)}</td>`).join('')}</tr></tbody></table></div>` : '';
   app.innerHTML = `${pageHead(esc(cur.title))}
   <div class="toolbar"><a class="btn" href="#/studies">Все исследования</a><button class="primary" data-act="add-study" data-id="${esc(cur.key)}">${ic('plus')}Добавить</button><button data-act="print">Печать</button></div>
   ${items.length > 1 ? '' : '<p class="muted">Когда исследований этого вида станет два и больше, здесь появятся динамика параметров и графики.</p>'}
@@ -506,7 +529,7 @@ function viewStudies(param) {
 function viewTimeline(param) {
   const all = [
     ...analyses.map(a => ({ k: 'analysis', date: a.date, icon: 'drop', tint: 'sky', title: 'Анализы' + (a.lab ? ', ' + a.lab : ''), sub: `показателей: ${(a.results || []).length}`, html: analysisCard(a) })),
-    ...studies.map(s => ({ k: 'study', date: s.date, icon: 'scan', tint: 'lilac', title: studyTitle(s), sub: s.conclusion || '', html: studyCard(s) })),
+    ...studies.map(s => ({ k: 'study', date: s.date, icon: 'scan', tint: 'lilac', title: studyTitle(s), sub: studyText(s).conclusion, html: studyCard(s) })),
     ...conclusions.map(c => ({ k: 'visit', date: c.date, icon: 'doc', tint: 'green', title: c.specialty || 'Врач', sub: c.diagnosis || c.text || '', html: conclusionCard(c) })),
   ].filter(x => !param || x.k === param).sort(byDateDesc);
   const chips = [['', 'Всё'], ['analysis', 'Анализы'], ['study', 'Исследования'], ['visit', 'Заключения']];
@@ -538,7 +561,7 @@ function viewSummary(param) {
     const f = flag(x.last);
     return `<tr><td>${esc(x.name)}</td><td class="v ${f}">${esc(x.last.value)} <small>${unitHtml(x.last.unit)}</small></td><td class="muted">${esc(rangeText(x.last))}</td><td class="muted">${fmtDate(x.last.date)}</td><td class="muted">${x.prev ? `${esc(x.prev.value)} (${fmtDate(x.prev.date)})` : ''}</td><td class="muted">${x.prev ? deltaText(x.last.value, x.prev.value) : ''}</td></tr>`;
   }).join('')}</tbody></table>` : '<p class="muted">Нет анализов за период.</p>'}</div>
-  <div class="card"><h3>Исследования</h3>${st.map(s => `<p><b>${fmtDate(s.date)}, ${esc(studyTitle(s))}</b><br><span class="note">${esc(s.conclusion || 'заключение не указано')}</span></p>`).join('') || '<p class="muted">Нет исследований за период.</p>'}</div>
+  <div class="card"><h3>Исследования</h3>${st.map(s => `<p><b>${fmtDate(s.date)}, ${esc(studyTitle(s))}</b><br><span class="note">${esc(studyText(s).conclusion || 'заключение не указано')}</span></p>`).join('') || '<p class="muted">Нет исследований за период.</p>'}</div>
   <div class="card"><h3>Заключения врачей</h3>${cs.map(c => `<p><b>${fmtDate(c.date)}, ${esc(visitType(c))}</b>${c.diagnosis ? `<br>Диагноз: <span class="note">${esc(c.diagnosis)}</span>` : ''}${c.recs ? `<br>Рекомендации: <span class="note">${esc(c.recs)}</span>` : ''}</p>`).join('') || '<p class="muted">Нет заключений за период.</p>'}</div>`;
   const on = meds.filter(x => x.active !== false);
   if (on.length) app.insertAdjacentHTML('beforeend', `<div class="card"><h3>Лекарства сейчас</h3><table><tbody>${on.map(x => `<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.dose || '')}</td><td>${esc(x.schedule || '')}</td><td class="muted">${esc(x.source || '')}</td></tr>`).join('')}</tbody></table></div>`);
@@ -687,6 +710,7 @@ async function studyForm(s, draft, seriesKey) {
     description: (p && (p.body || p.clean)) || (draft && draft.text) || '', conclusion: (p && p.conclusion) || '', recs: (p && p.recs) || '',
     measures: (p && p.measures) || (tpl ? (tpl.measures || []).map(m => ({ name: m.name, value: '', unit: m.unit })) : []), files: draftFiles(draft),
   };
+  if (s.id) s = { ...s, ...studyText(s) };
   const isNew = !s.id, params = isNew ? s.measures : studyParams(s), medList = isNew ? (p && p.meds) || [] : medsOf(s.id);
   const areas = [...new Set([...studies.map(x => x.area).filter(Boolean), ...STUDY_AREAS.map(x => x[0])])];
   const mnames = [...new Set(studies.flatMap(x => (x.measures || []).map(m => m.name)).filter(Boolean))];
@@ -707,7 +731,7 @@ async function studyForm(s, draft, seriesKey) {
     const g = n => f.elements[n].value.trim();
     const measures = readRows(f, '#rows .row', ['name', 'value', 'unit']).filter(m => m.name && m.value !== '');
     const files = await saveFiles(f, s.files);
-    const rec = { id: s.id || uid(), date: f.elements.date.value, type: f.elements.type.value, area: g('area'), clinic: g('clinic'), doctor: g('doctor'), conclusion: g('conclusion'), recs: g('recs'), description: g('description'), nextDate: f.elements.nextDate.value, measures, files, pv: 2 };
+    const rec = { id: s.id || uid(), date: f.elements.date.value, type: f.elements.type.value, area: g('area'), clinic: g('clinic'), doctor: g('doctor'), conclusion: g('conclusion'), recs: g('recs'), description: g('description'), nextDate: f.elements.nextDate.value, measures, files, pv: PARSER_VERSION };
     await DB.put('studies', rec);
     await syncMeds(f, rec, studyTitle(rec));
     if (draft) await DB.del('inbox', draft.id);
@@ -771,7 +795,7 @@ async function processInbox() {
       try {
         const f = await DB.get('files', d.fileId);
         const res = await OCR.recognize(f.blob, f.type, v => { const el = document.getElementById('prog-' + d.id); if (el) el.value = v; });
-        Object.assign(d, analyzeText(res.text, today(), res.lines), { text: res.text, status: 'ready' });
+        Object.assign(d, analyzeText(res.text, today(), res.lines), { text: res.text, status: 'ready', pver: PARSER_VERSION });
       } catch (e) {
         Object.assign(d, { status: 'error', error: String((e && e.message) || e), text: '', kind: '', parsed: null });
       }
@@ -834,7 +858,15 @@ async function removeEntity(s, id) {
   await gc(); await load(); render();
 }
 function applyTheme(t) { document.documentElement.dataset.theme = t; }
-const draftOf = id => inbox.find(d => d.id === id);
+const draftOf = id => {
+  const d = inbox.find(x => x.id === id);
+  if (d && d.text && d.pver !== PARSER_VERSION) {
+    const re = analyzeText(d.text, today()), old = d.parsed || {};
+    d.parsed = { ...re.parsed, results: (old.results || []).length ? old.results : re.parsed.results, date: old.date || re.parsed.date, lab: old.lab || re.parsed.lab };
+    d.pver = PARSER_VERSION;
+  }
+  return d;
+};
 const actions = {
   'add-analysis': () => analysisForm(),
   'edit-analysis': id => analysisForm(analyses.find(a => a.id === id)),

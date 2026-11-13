@@ -313,71 +313,112 @@ function cleanText(text) {
 // ---------- параметры исследования: и числа, и словесные («не выявлено», «однородная») ----------
 const STATUS = '(?:не\\s+(?:выявлен|обнаружен|определя|визуализир|увеличен|расширен|изменен|утолщен|смещен|деформирован|нарушен|лоцир|пальпир)[а-яё]*|без\\s+(?:особенностей|патологии|патологических\\s+изменений|видимых\\s+изменений|изменений|признаков[^.;]*|очаговых[^.;]*)|отсутству[а-яё]+|в\\s+(?:пределах\\s+)?норм[еы]|сохранен[а-яё]*|неоднородн[а-яё]+|однородн[а-яё]+|обычн[а-яё]+|средн[а-яё]+|повышен[а-яё]*|понижен[а-яё]*|снижен[а-яё]*|увеличен[а-яё]*|расширен[а-яё]*|неровн[а-яё]+|ровн[а-яё]+|неч[её]тк[а-яё]+|ч[её]тк[а-яё]+)';
 const DIMS = `${NUM}(?:\\s*[xх×*]\\s*${NUM}){0,2}`;
-const M_UNIT = '(мм|см3|см³|см\\^3|куб\\.?\\s?см|мл|см\\/с|м\\/с|см|%|уд\\/мин)';
-const normUnit = u => String(u || '').replace(/см3|см\^3|куб\.?\s?см/, 'см³');
+const M_UNIT = '(мм|см3|см³|см\\^3|куб\\.?\\s?см|см2|см²|мл|см\\/с|м\\/с|см|%|уд\\/мин)';
+const normUnit = u => String(u || '').replace(/см3|см\^3|куб\.?\s?см/, 'см³').replace(/см2/, 'см²');
 const normDims = v => v.replace(/\s*[xх×*]\s*/g, '×').replace(/,/g, '.');
+const ORGANS = /^(печень|желчный пузырь|желчевыводящие протоки|поджелудочная железа|селез[её]нка|почки|правая почка|левая почка|надпочечники|мочевой пузырь|мочеточники|щитовидная железа|правая доля|левая доля|перешеек|паращитовидные железы|матка|шейка матки|эндометрий|миометрий|правый яичник|левый яичник|яичники|маточные трубы|предстательная железа|семенные пузырьки|молочные железы|правая молочная железа|левая молочная железа|лимфатические узлы|регионарные лимфатические узлы|регионарные лимфоузлы|сердце|аорта|брюшная аорта|л[её]гкие|плевральные полости|средостение|головной мозг|желудочки мозга|гипофиз|позвоночник|спинной мозг|межпозвонковые диски|суставы|мягкие ткани|сосуды|вены|артерии|кости|придаточные пазухи носа)$/i;
+const NOT_SECTION = /^(заключение|рекомендаци|рекомендовано|врач|дата|подпис|протокол|описание|результат|исследование)/i;
+const GENERAL = /свободн[а-яё]+ жидкост|лимфатическ|лимфоузл|дополнительн|прочее/i;
+// Параметры раскладываются по органам: «Печень: Контуры», «Желчный пузырь: Контуры».
 function parseFindings(text) {
   const out = [], seen = new Set();
-  const add = (name, value, unit = '') => {
-    name = tidy(name); value = tidy(value);
+  let section = '';
+  const add = (group, name, value, unit = '') => {
+    name = tidy(name); value = tidy(value).replace(/\s+([.,;:])/g, '$1'); group = tidy(group);
     if (!name || !value || name.length > 70 || value.length > 140 || !/[A-Za-zА-Яа-яЁё]{2}/.test(name)) return;
-    const k = pNorm(name);
+    const full = group && pNorm(group) !== pNorm(name) ? `${capFirst(group)}: ${capFirst(name)}` : capFirst(name);
+    const k = pNorm(full);
     if (seen.has(k)) return;
-    seen.add(k); out.push({ name: capFirst(name), value, unit: normUnit(unit) });
+    seen.add(k); out.push({ name: full, value, unit: normUnit(unit) });
   };
+  const sectionName = x => { const t = tidy(x); return t === t.toUpperCase() ? capFirst(t.toLowerCase()) : capFirst(t); };
   const measureRe = new RegExp(`^([А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z \\-]{1,50}?)\\s*[-–—=:]?\\s*(${DIMS})\\s*${M_UNIT}?$`, 'i');
-  const bareRe = new RegExp(`^(${DIMS})\\s*${M_UNIT}?$`, 'i');
+  const bareRe = new RegExp(`^\\(?\\s*(${DIMS})\\s*\\)?\\s*${M_UNIT}?$`, 'i');
+  const keyDimsRe = new RegExp(`^(.+?)\\s*\\(\\s*(${DIMS})\\s*\\)$`);
   const statusRe = new RegExp(`^(.{3,60}?)\\s*[-–—]?\\s+(${STATUS}.*)$`, 'i');
   const inlineRe = new RegExp(`([А-Яа-яЁё][А-Яа-яЁё \\-]{2,50}?)\\s*[:\\-–—=]?\\s*(${DIMS})\\s*${M_UNIT}(?![а-яa-z0-9])`, 'gi');
-  const sentences = String(text || '').replace(/([.;])\s+(?=[А-ЯЁ])/g, '$1\n').split(/\r?\n/);
+  // склеиваем перенесённые строки: «... : не» + «расширены»
+  const joined = [];
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.replace(/\s+/g, ' ').trim();
+    const prev = joined[joined.length - 1];
+    if (line && prev && prev.includes(':') && !line.includes(':') && /^[а-яё(]/.test(line) && !/[.;]$/.test(prev)) joined[joined.length - 1] = prev + ' ' + line;
+    else joined.push(line);
+  }
+  const sentences = joined.join('\n').replace(/([.;])\s+(?=[А-ЯЁ])/g, '$1\n').split('\n');
   for (const raw of sentences) {
-    const line = raw.replace(/\s+/g, ' ').trim().replace(/[.;]$/, '');
-    if (line.length < 4 || JUNK_LINE.test(line) || PATIENT_LINE.test(line) || /^(заключение|рекомендаци|врач|дата|подпись|протокол)/i.test(line)) continue;
-    const cm = line.match(/^([А-ЯЁа-яёA-Za-z][А-Яа-яЁёA-Za-z \-\/()]{2,44}?)\s*:\s*(.+)$/);
+    const line = raw.trim().replace(/\s*[.;]$/, '');
+    if (line.length < 3 || JUNK_LINE.test(line) || PATIENT_LINE.test(line)) continue;
+    // заголовок раздела: «ПЕЧЕНЬ», «Поджелудочная железа :»
+    const bare = line.replace(/\s*:\s*$/, '');
+    if (!/\d/.test(bare) && bare.length <= 45 && !bare.includes(':')) {
+      const caps = bare === bare.toUpperCase() && (bare.match(/[А-ЯЁ]/g) || []).length >= 3;
+      if (NOT_SECTION.test(bare)) { if (caps || /:\s*$/.test(line)) section = ''; if (/^(заключение|рекомендаци|рекомендовано|подпис)/i.test(bare)) break; continue; }
+      if (caps || /:\s*$/.test(line) || ORGANS.test(bare)) { section = sectionName(bare); continue; }
+    }
+    if (/^(заключение|рекомендаци|рекомендовано)/i.test(line)) break;
+    if (/^(врач|дата|подпис|протокол)/i.test(line)) continue;
+    const cm = line.match(/^([А-ЯЁа-яёA-Za-z][^:]{1,60}?)\s*:\s*(.+)$/);
     if (cm) {
-      const subject = cm[1], rest = cm[2];
+      let subject = tidy(cm[1]); const rest = cm[2];
+      let group = section;
+      if (ORGANS.test(subject)) { section = group = sectionName(subject); subject = ''; }
+      const kd = keyDimsRe.exec(subject); // «Размеры (31,2 х 24,6) : мм»
+      if (kd) {
+        add(group, kd[1], normDims(kd[2]), (rest.match(new RegExp('^' + M_UNIT, 'i')) || [])[1] || '');
+        let x; inlineRe.lastIndex = 0;
+        while ((x = inlineRe.exec(rest))) add(group, x[1], normDims(x[2]), x[3]);
+        continue;
+      }
+      const label = sub => (subject ? `${subject} ${sub ? sub.toLowerCase() : ''}`.trim() : sub);
       const parts = rest.split(/[,;]\s+/);
       const parsed = parts.map(pt => { const t = tidy(pt); return bareRe.exec(t) ? { bare: bareRe.exec(t) } : measureRe.exec(t) ? { m: measureRe.exec(t) } : null; });
       if (parsed.some(Boolean)) {
         let lastText = null; const loose = [];
         parts.forEach((pt, i) => {
           const r = parsed[i], t = tidy(pt);
-          if (r && r.bare) add(subject, normDims(r.bare[1]), r.bare[2]);
-          else if (r) add(`${subject}: ${r.m[1]}`, normDims(r.m[2]), r.m[3]);
+          if (r && r.bare) add(group, subject || 'Размер', normDims(r.bare[1]), r.bare[2]);
+          else if (r) add(group, label(r.m[1]), normDims(r.m[2]), r.m[3]);
           else {
             const sm = statusRe.exec(t);
-            if (sm) { add(`${subject}: ${sm[1]}`, sm[2]); lastText = out[out.length - 1]; }
+            if (sm) { add(group, label(sm[1]), sm[2]); lastText = out[out.length - 1]; }
             else if (lastText) lastText.value += ', ' + t;
             else loose.push(t);
           }
         });
-        if (loose.length) add(`${subject}: описание`, loose.join(', '));
+        if (loose.length) add(group, label('описание'), loose.join(', '));
       } else {
-        // «Печень: размеры не увеличены, контуры ровные, четкие» → отдельные параметры
         const items = []; let ok = true;
         for (const pt of parts) {
           const sm = statusRe.exec(tidy(pt));
           if (sm) items.push([sm[1], sm[2]]); else if (items.length) items[items.length - 1][1] += ', ' + tidy(pt); else { ok = false; break; }
         }
-        if (ok && items.length > 1) items.forEach(([n, v]) => add(`${subject}: ${n}`, v)); else add(subject, rest);
+        if (ok && items.length > 1) items.forEach(([n, v]) => add(group, label(n), v));
+        else add(group, subject || 'Описание', rest);
       }
       continue;
     }
-    // «Свободная жидкость не обнаружена», «Контуры ровные, структура однородная»
+    // предложения без двоеточия: «Свободная жидкость не обнаружена», «Перешеек 3 мм»
+    const groupFor = name => {
+      if (GENERAL.test(name)) { section = ''; return ''; }
+      const w = name.split(/\s+/);
+      for (let n = Math.min(3, w.length); n > 0; n--) if (ORGANS.test(w.slice(0, n).join(' '))) return '';
+      return section;
+    };
     const parts = line.split(/,\s+/);
     const st = parts.map(pt => statusRe.exec(pt));
-    if (parts.length > 1 && st.every(Boolean)) { st.forEach(m => add(m[1], m[2])); continue; }
+    if (parts.length > 1 && st.every(Boolean)) { st.forEach(m => add(groupFor(m[1]), m[1], m[2])); continue; }
     let found = false, m;
     inlineRe.lastIndex = 0;
     while ((m = inlineRe.exec(line))) {
       if (/[xх×*]\s*$/.test(line.slice(0, m.index + m[1].length))) continue;
-      add(m[1], normDims(m[2]), m[3]); found = true;
+      add(groupFor(m[1]), m[1], normDims(m[2]), m[3]); found = true;
     }
     if (found) continue;
     const sm = statusRe.exec(line);
-    if (sm) add(sm[1], sm[2]);
+    if (sm) add(groupFor(sm[1]), sm[1], sm[2]);
   }
-  return out.slice(0, 60);
+  return out.slice(0, 120);
 }
 
 // ---------- назначенные лекарства ----------
@@ -398,6 +439,7 @@ function parseMeds(text) {
   }
   return out;
 }
+const PARSER_VERSION = 3;
 const DOC_KINDS = [['Выписка', ['выписной эпикриз', 'выписка']], ['Справка', ['справка']], ['Консультация', ['консультаци']], ['Осмотр', ['осмотр', 'прием врача']]];
 
 function analyzeText(text, todayIso, lines) {
@@ -421,10 +463,10 @@ function analyzeText(text, todayIso, lines) {
   const lab = LABS.map(([k, n]) => ({ n, i: findWord(t, k) })).filter(x => x.i >= 0).sort((a, b) => a.i - b.i)[0];
   const doc = text.match(/[Вв]рач[^\n:]{0,30}[:\s]\s*([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ]\.\s?[А-ЯЁ]\.|\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+))/);
   const E = '(?![а-яё])';
-  const STOP = new RegExp(`\\n\\s*(рекомендаци|назначени|врач${E}|подпись|дата${E})`, 'i');
+  const STOP = new RegExp(`\\n\\s*(рекомендаци|рекомендовано|назначени|врач${E}|подпис|дата${E})`, 'i');
   const clean = cleanText(text);
-  const body = clean.text.split(/\n\s*заключение\s*[:.\-–]/i)[0];
-  const recs = section(text, /рекомендаци[ия]\s*[:.\-–]?\s*/i, new RegExp(`\\n\\s*(врач${E}|подпись|дата${E}|заключение)`, 'i'));
+  const body = clean.text.split(/\n\s*заключение\s*[:.\-–\n]/i)[0];
+  const recs = section(text, /(?:рекомендаци[ия]|рекомендовано)\s*[:.\-–]?\s*/i, new RegExp(`\\n\\s*(врач${E}|подпис|дата${E}|заключение)`, 'i')).replace(/\s+([.,;:])/g, '$1');
   const rx = section(text, /(?:назначени[ея]|лечение|терапия)\s*[:.\-–]\s*/i, new RegExp(`\\n\\s*(врач${E}|подпись|дата${E}|рекомендаци|заключение)`, 'i'));
   const kindHit = earliest(t, DOC_KINDS);
   return {
@@ -435,7 +477,7 @@ function analyzeText(text, todayIso, lines) {
       results,
       studyType: st ? st.name : '',
       area: area ? area.name : '',
-      conclusion: section(text, /заключение\s*[:.\-–]?\s*/i, STOP),
+      conclusion: section(text, /заключение\s*[:.\-–]?\s*/i, STOP).replace(/\s+([.,;:])/g, '$1'),
       recs: [recs, rx && !recs.includes(rx) ? rx : ''].filter(Boolean).join('\n'),
       diagnosis: section(text, /диагноз[^:\n]{0,40}:\s*/i, new RegExp(`\\n\\s*(рекомендаци|план${E}|назначен|лечение|врач${E})`, 'i'), 600),
       measures: kind === 'study' ? parseFindings(body) : [],

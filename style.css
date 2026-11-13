@@ -101,11 +101,14 @@ a.card.link .rec-head > .ic { align-self: center; color: var(--muted); }
 .concl span { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
 .concl p { margin: 0; font-weight: 600; font-size: 15px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .concl.dx { background: var(--cream); }
-h4.pg { margin: 14px 0 6px; font-size: 14px; color: var(--ink); }
+.organ { border: 1.5px solid var(--line); border-radius: var(--r-md); padding: 12px; margin: 10px 0; }
+.organ > h4 { display: flex; justify-content: space-between; align-items: baseline; margin: 0 2px 8px; font-size: 17px; font-weight: 700; letter-spacing: -.01em; color: var(--ink); }
+.organ .params { margin: 0; }
+table.matrix tr.org td { font-weight: 700; font-size: 15px; padding-top: 16px; border-bottom: 2px solid var(--ink); position: static; }
 .params { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin: 8px 0; }
 .param { display: grid; gap: 2px; align-content: start; padding: 10px 12px; border-radius: var(--r-sm); background: var(--field); min-width: 0; }
-.param span { font-size: 12px; font-weight: 600; color: var(--muted); overflow-wrap: anywhere; }
-.param b { font-size: 15px; font-weight: 700; overflow-wrap: anywhere; line-height: 1.3; }
+.param span { font-size: 12px; font-weight: 600; color: var(--muted); overflow-wrap: break-word; hyphens: auto; -webkit-hyphens: auto; }
+.param b { font-size: 15px; font-weight: 700; overflow-wrap: break-word; hyphens: auto; -webkit-hyphens: auto; line-height: 1.3; }
 .param.numv b { font-size: 20px; font-weight: 600; letter-spacing: -.02em; }
 .param b small { font-size: 12px; font-weight: 600; color: var(--muted); }
 .param.clear { background: var(--ok-bg); } .param.clear b { color: var(--ok); }
